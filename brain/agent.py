@@ -101,6 +101,9 @@ DEFAULTS = {
     "w_center": 15.0,        # survival: weight of closeness to the next zone centre
     "surv_dist": 0.3,        # survival: range-keeping weight multiplier
     "surv_fire_r": 100.0,    # survival: hold fire beyond this range unless that mech shot us in the last 8 s
+    "upg_weapon": 0,         # take laser/lightning upgrades before survival ones
+    "dual": 0,               # fire the gun alongside a charging laser or the lightning
+    "laser_hold": 0.75,      # laser charge (s) to release at on an exposed target
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
     "w_grab": 40.0,          # utility of closing on the grab point
@@ -1234,6 +1237,9 @@ class Agent:
             s = kinds.index("lightning")
             cone = math.radians(weapons[s]["stats"].get("cone_deg", 30)) / 2
             fire[s] = abs(wrap(aim[0] - me["aim"][0])) < cone * 0.8
+            if self.P["dual"] and "gun" in kinds:
+                aim, gs, gf = self._gun_shot(th, weapons, kinds, eye, centre, d)
+                fire[gs] = gf
             return aim, fire
         if short:
             return aim, fire
@@ -1248,9 +1254,13 @@ class Agent:
                            for e in self.enemies() if e.id < 100)
             # hold to >= 0.5 s (or full) on an exposed target; release early past min_charge when a
             # lightning carrier closes in; let go on target so the 2 s auto-fire never wastes a shot
-            release = on and (ch >= min(0.5, full_s * 0.97) or (arc_near and ch >= 0.15))
+            ready = ch >= min(self.P["laser_hold"], full_s * 0.97) or (arc_near and ch >= 0.15)
+            release = on and ready
             if w.get("cooldown", 0) <= 0.05 or ch > 0:
                 fire[s] = not release
+                if self.P["dual"] and not ready and "gun" in kinds:
+                    aim, gs, gf = self._gun_shot(th, weapons, kinds, eye, centre, d)
+                    fire[gs] = gf
                 return aim, fire
         if "mortar" in kinds and 25.0 <= d <= 235.0 and (not clear or "gun" not in kinds or d > 150):
             s = kinds.index("mortar")
@@ -1262,14 +1272,19 @@ class Agent:
                     and w.get("cooldown", 0) <= 0.0
                 return ma, fire
         if "gun" in kinds and clear:
-            s = kinds.index("gun")
-            w = weapons[s]
-            p = lead(eye, centre, th.vel, w["stats"].get("speed", 252.0), 1.0)
-            aim = list(yaw_pitch(eye, p))
-            err = abs(wrap(aim[0] - me["aim"][0])) + abs(aim[1] - me["aim"][1])
-            fire[s] = err < max(0.01, math.atan2(self.P["aim_tol"], max(d, 1.0))) and w.get("ammo", 1) > 0 \
-                and d <= w["stats"].get("range", 230.0)
+            aim, s, fire[s] = self._gun_shot(th, weapons, kinds, eye, centre, d)
         return aim, fire
+
+    def _gun_shot(self, th: Threat, weapons, kinds, eye, centre, d: float):
+        me = self.me
+        s = kinds.index("gun")
+        w = weapons[s]
+        p = lead(eye, centre, th.vel, w["stats"].get("speed", 252.0), 1.0)
+        aim = list(yaw_pitch(eye, p))
+        err = abs(wrap(aim[0] - me["aim"][0])) + abs(aim[1] - me["aim"][1])
+        ok = err < max(0.01, math.atan2(self.P["aim_tol"], max(d, 1.0))) and w.get("ammo", 1) > 0 \
+            and d <= w["stats"].get("range", 230.0)
+        return aim, s, ok
 
     def scan(self, me: dict) -> List[float]:
         t = self.t
@@ -1289,5 +1304,10 @@ class Agent:
     # ================================================================== upgrades
     def pick_upgrade(self, offer: dict) -> int:
         ids = [c["id"] for c in offer["choices"]]
-        rank = {u: n for n, u in enumerate(UPGRADE_ORDER)}
+        order = UPGRADE_ORDER
+        if self.P["upg_weapon"]:
+            first = ["laser_damage", "laser_charge", "lightning_efficiency", "lightning_range", "laser_pierce",
+                     "lightning_chain"]
+            order = first + [u for u in UPGRADE_ORDER if u not in first]
+        rank = {u: n for n, u in enumerate(order)}
         return min(range(len(ids)), key=lambda i: rank.get(ids[i], 99))
