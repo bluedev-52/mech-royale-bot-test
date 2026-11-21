@@ -101,9 +101,14 @@ DEFAULTS = {
     "w_center": 15.0,        # survival: weight of closeness to the next zone centre
     "surv_dist": 0.3,        # survival: range-keeping weight multiplier
     "surv_fire_r": 100.0,    # survival: hold fire beyond this range unless that mech shot us in the last 8 s
+    "no_gun": 0,             # with a laser or lightning, trade the gun for the other one
     "upg_weapon": 0,         # take laser/lightning upgrades before survival ones
     "dual": 0,               # fire the gun alongside a charging laser or the lightning
     "laser_hold": 0.75,      # laser charge (s) to release at on an exposed target
+    "cube_grab": 1,          # walk straight onto visible cubes within cube_grab_r (3.5 m pickup radius)
+    "cube_grab_r": 40.0,
+    "drop_grab": 0,          # walk onto a landed, unheld supply drop (3 cubes + full HP) within drop_grab_r
+    "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
     "w_grab": 40.0,          # utility of closing on the grab point
@@ -743,6 +748,29 @@ class Agent:
                         best_g = (dg, (float(pk["pos"][0]), float(pk["pos"][1])))
                 if best_g is not None:
                     self.grab_pt = best_g[1]
+        if self.grab_pt is None and P["drop_grab"]:
+            best_d = None
+            for dr in obs.get("drops", []):
+                q = dr["pos"]
+                dd = math.dist(q[:2], (x, y))
+                if dr.get("holder") not in (None, me["id"]) or abs(q[2] - z) > 3.5 \
+                        or float(dr.get("lands_in", 99.0)) > dd / 11.7:
+                    continue
+                if dd < P["drop_grab_r"] and self.time_to_edge(q[0], q[1]) > 10.0 \
+                        and (best_d is None or dd < best_d[0]):
+                    best_d = (dd, (float(q[0]), float(q[1])))
+            if best_d is not None:
+                self.grab_pt = best_d[1]
+        if self.grab_pt is None and P["cube_grab"] and int(me.get("cubes", 0)) < 10:
+            best_c = None
+            for c in obs.get("cubes", []):
+                if abs(c["pos"][2] - z) > 3.5:
+                    continue
+                dc = math.dist(c["pos"][:2], (x, y))
+                if dc < P["cube_grab_r"] and (best_c is None or dc < best_c[0]):
+                    best_c = (dc, (float(c["pos"][0]), float(c["pos"][1])))
+            if best_c is not None:
+                self.grab_pt = best_c[1]
         pts = self.candidates()
         if self.grab_pt is not None:
             gx, gy = self.grab_pt
@@ -1038,6 +1066,10 @@ class Agent:
             pref["mortar"] = 0.6
         if None in kinds:
             return pref
+        if self.P["no_gun"] and "gun" in kinds:
+            other = [k for k in kinds if k in ("laser", "lightning")]
+            if other:
+                return {"lightning" if other[0] == "laser" else "laser": 1.0}
         if self.P["swap_mortar"] and "mortar" in kinds:
             return {"lightning": 0.9, "laser": 0.9}
         return {}
@@ -1114,10 +1146,11 @@ class Agent:
             return {}
         if None in kinds:
             return {"take": best[1]}
-        w = weapons[kinds.index("mortar")]
+        slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
+        w = weapons[slot]
         if w.get("cooldown", 0) > 0.5:
             return {}
-        return {"take": best[1], "drop": kinds.index("mortar")}
+        return {"take": best[1], "drop": slot}
 
     # ================================================================== aim / fire
     def plan_aim_fire(self, locks, target):
