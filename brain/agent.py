@@ -121,7 +121,7 @@ DEFAULTS = {
     "e3": 0,                 # E3: keep >= e3_r from every house mech seen in the last 2 s
     "e3_r": 65.0,
     "w_easy": 20.0,
-    "e4": 0,                 # E4: from e4_t0 boost only above e4_res energy, except escapes below e4_hp
+    "e4": 1,                 # E4: from e4_t0 boost only above e4_res energy, except escapes below e4_hp
     "e4_t0": 190.0,
     "e4_res": 60.0,
     "e4_hp": 0.5,
