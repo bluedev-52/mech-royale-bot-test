@@ -117,7 +117,19 @@ DEFAULTS = {
     "edge_t0": 265.0,
     "edge_m": 12.0,
     "w_edge": 15.0,
-    "lure": 0,               # with hunters near, prefer ~58 m from known drones (45 m aggro) so chasers draw fire
+    "lure": 0,
+    "e2": 0,                 # E2: in [e2_t0, e2_t1] move out of sight of every house bot seen in e2_mem s
+    "e2_t0": 185.0,
+    "e2_t1": 330.0,
+    "w_vis": 25.0,
+    "e2_mem": 15.0,
+    "e2_fire_r": 70.0,
+    "roof": 0,               # E1: from roof_t0, jet onto a roof interior inside the next zone and hold there
+    "roof_t0": 185.0,
+    "roof_hmax": 40.0,
+    "roof_in": 8.0,
+    "roof_zone": 0.8,
+    "roof_strafe": 0.0,      # E1b: on the roof, strafe across the nearest seen enemy within this radius of the site               # with hunters near, prefer ~58 m from known drones (45 m aggro) so chasers draw fire
     "w_lure": 15.0,
     "drop_grab": 0,          # walk onto a landed, unheld supply drop (3 cubes + full HP) within drop_grab_r
     "drop_grab_r": 250.0,
@@ -288,6 +300,10 @@ class Agent:
         incoming = self.incoming(obs)
         target = self.select_target()
         move, boost, jump = self.plan_move(obs, locks, incoming, target)
+        if self.P["roof"]:
+            r = self.roof_move()
+            if r is not None:
+                move, boost, jump = r
         aim, fire = self.plan_aim_fire(locks, target)
         a.update(self.plan_take(obs, target))
         # proactive reload only with <= 4 rounds and nobody close (reload is heard at 60 m)
@@ -865,6 +881,17 @@ class Agent:
             gz2 = np.array([self.world.ground_at(px, py) for px, py in pts])
             f_cover = np.clip(f_cover + 0.15 * np.clip((gz2 - g0) / 5.0, 0.0, 1.0), 0.0, 1.0)
 
+        f_vis = None
+        if P["e2"] and P["e2_t0"] <= self.t <= P["e2_t1"] and time.perf_counter() < self.deadline:
+            watch = sorted((th for th in enemies if th.id < 100 and self.t - th.seen < P["e2_mem"]),
+                           key=lambda th: dmeE[th.id])[:8]
+            if watch:
+                gzv = np.full(n, z) if on_roof else np.array([self.world.ground_at(px, py) for px, py in pts])
+                eh = self.mech.get("eye_height", 8.0)
+                A = np.repeat([th.pos + np.array([0.0, 0.0, eh]) for th in watch], n, axis=0)
+                B = np.stack([np.tile(X, len(watch)), np.tile(Y, len(watch)),
+                              np.tile(gzv + 5.5, len(watch))], axis=1)
+                f_vis = self.world.los_batch(A, B, vision=True, step=2.0).reshape(len(watch), n).mean(0)
         # ---------------------------------------------------------- f_aoe
         f_aoe = np.zeros(n)
         spd = self.mech.get("boost_speed", 19.5) if me["energy"] > 10 else self.mech.get("walk_speed", 11.7)
@@ -1037,6 +1064,8 @@ class Agent:
                 U = U + P["w_lure"] * np.exp(-((dd - 58.0) ** 2) / 128.0) - P["w_lure"] * (dd < 45.0)
         if P["surv"]:
             U = U + P["w_center"] * np.clip(1.0 - dn / max(nr, 1.0), 0.0, 1.0)
+        if f_vis is not None:
+            U = U - P["w_vis"] * f_vis
         if self.hiding and P["w_hold"] > 0:
             U = U + P["w_hold"] * f_cover * (dist < 1.5) + W["kin"] * 0.4 * still
         # under fire, hold a direction for 0.6-1.1 s: flipping every tick cancels our speed
@@ -1085,7 +1114,122 @@ class Agent:
                 and self.t - self.last_hit_t > 5.0 and best_loot < 0.5:
             mag = min(mag, P["silent_move"])
             boost = False
+        if f_vis is not None and urg < 0.5 and me.get("in_zone", True) and not any(
+                th.id < 100 and not th.est and self.t - th.seen < 1.0 for th in enemies):
+            mag = min(mag, P["silent_move"])
+            boost = False
         return (h[0] * mag, h[1] * mag), boost, False
+
+    # ================================================================== roof refuge (E1)
+    def _roof_sites(self):
+        if getattr(self, "_rsites", None) is None:
+            from brain.world import EMPTY_HI
+            from brain.nav import shift
+            nav, w = self.nav, self.world
+            Jg, Ig = np.mgrid[0:nav.NY, 0:nav.NX]
+            cx, cy = nav.center_batch(Jg, Ig)
+            ii = np.clip(((cx - w.minx) / w.step).astype(int), 0, w.nx - 1)
+            jj = np.clip(((cy - w.miny) / w.step).astype(int), 0, w.ny - 1)
+            top, g = w.s_hi[jj, ii], w.ground[jj, ii]
+            roof = (top > EMPTY_HI) & (top - g > 6.0) & (top - g < self.P["roof_hmax"])
+            rc = max(1, int(math.ceil(self.P["roof_in"] / (nav.k * w.step))))
+            inner = roof.copy()
+            for dj in range(-rc, rc + 1):
+                for di in range(-rc, rc + 1):
+                    if dj * dj + di * di <= rc * rc:
+                        st = shift(top, dj, di, fill=-1e9)
+                        inner &= shift(roof, dj, di) & (np.abs(st - top) < 1.5)
+            J, I = np.nonzero(inner)
+            self._rsites = (cx[J, I], cy[J, I], top[J, I])
+            self.roof_site, self.roof_foot, self.roof_field = None, None, None
+            self.roof_bad, self.roof_climb_t, self.roof_pick_t = [], None, -1e9
+        return self._rsites
+
+    def roof_move(self):
+        P, me = self.P, self.me
+        self.roof_phase = None
+        if self.t < P["roof_t0"] or not me.get("in_zone", True) or self.zone_urgency() >= 1.0:
+            return None
+        X, Y, H = self._roof_sites()
+        if len(X) == 0:
+            return None
+        x, y, z = self.pos
+        zn = self.zone
+        nc, nr = zn["next_center"], float(zn["next_radius"])
+        zc, zr = zn["center"], float(zn["radius"])
+        s = self.roof_site
+        ok_site = s is not None and math.dist(s[:2], nc) < P["roof_zone"] * nr and math.dist(s[:2], zc) < 0.9 * zr
+        on = s is not None and z >= s[2] - 1.0 and math.dist(s[:2], (x, y)) < 30.0
+        if not ok_site or (not on and self.t - self.roof_pick_t > 3.0):
+            ok = (np.hypot(X - nc[0], Y - nc[1]) < P["roof_zone"] * nr) & (np.hypot(X - zc[0], Y - zc[1]) < 0.9 * zr)
+            ok &= (H - z) * 1.6 + 15.0 <= max(float(me["energy"]), 100.0 if on else 0.0) + 40.0
+            for bx, by in self.roof_bad:
+                ok &= np.hypot(X - bx, Y - by) > 20.0
+            if not ok.any():
+                self.roof_site = None
+                return None
+            d = np.hypot(X - x, Y - y)
+            d[~ok] = np.inf
+            n = int(np.argmin(d))
+            new = (float(X[n]), float(Y[n]), float(H[n]))
+            self.roof_pick_t = self.t
+            if s is None or math.dist(new[:2], s[:2]) > 12.0:
+                self.roof_site = new
+                c = self.nav.nearest_walk(new[0], new[1], rmax=8)
+                self.roof_foot = self.nav.center(*c) if c is not None else None
+                self.roof_field, self.roof_climb_t = None, None
+                if c is not None:
+                    goal = np.zeros(self.nav.walk.shape, bool)
+                    goal[c] = True
+                    self.roof_field = NavField(self.nav, goal)
+            s = self.roof_site
+            on = z >= s[2] - 1.0 and math.dist(s[:2], (x, y)) < 30.0
+        sx, sy, sh = s
+        ds = math.dist((sx, sy), (x, y))
+        self.roof_phase = "approach"
+        if on:
+            self.roof_phase = "on"
+            self.roof_climb_t = None
+            seen = [th for th in self.enemies() if th.id < 100 and not th.est and self.t - th.seen < 1.0]
+            if P["roof_strafe"] > 0 and seen:
+                th = min(seen, key=lambda th: math.dist(th.pos[:2], (x, y)))
+                to = math.atan2(th.pos[1] - y, th.pos[0] - x)
+                if self.t > getattr(self, "roof_flip_t", -1.0):
+                    self.roof_side = -getattr(self, "roof_side", 1.0)
+                    self.roof_flip_t = self.t + self.rng.uniform(0.6, 1.1)
+                v = (math.cos(to + self.roof_side * math.pi / 2), math.sin(to + self.roof_side * math.pi / 2))
+                px, py = x + v[0] * 3.0, y + v[1] * 3.0
+                if math.dist((px, py), (sx, sy)) > P["roof_strafe"]:
+                    self.roof_side = -self.roof_side
+                    self.roof_flip_t = self.t + self.rng.uniform(0.6, 1.1)
+                    v = (-v[0], -v[1])
+                return v, False, False
+            if ds < 2.0:
+                return (0.0, 0.0), False, False
+            return ((sx - x) / ds, (sy - y) / ds), False, False
+        grounded = me.get("grounded", True)
+        foot = self.roof_foot
+        near = foot is not None and math.dist(foot, (x, y)) < 9.0
+        if near or self.roof_climb_t is not None or not grounded and ds < 25.0:
+            if self.roof_climb_t is None:
+                self.roof_climb_t = self.t
+            if self.t - self.roof_climb_t > 8.0:
+                self.roof_bad.append((sx, sy))
+                self.roof_site, self.roof_climb_t = None, None
+                return None
+            if me["energy"] < 5 and grounded:
+                return None
+            self.roof_phase = "climb"
+            return ((sx - x) / max(ds, 1e-6), (sy - y) / max(ds, 1e-6)), not grounded, grounded
+        f = self.roof_field
+        if f is not None and not f.done:
+            f.run(budget_s=0.004)
+        dvec = f.steer(x, y) if f is not None and f.done else None
+        if dvec is None:
+            tx, ty = foot if foot is not None else (sx, sy)
+            L = max(math.dist((tx, ty), (x, y)), 1e-6)
+            dvec = ((tx - x) / L, (ty - y) / L)
+        return dvec, False, False
 
     # ================================================================== loot
     def weapon_pref(self, kinds) -> Dict[str, float]:
@@ -1209,7 +1353,9 @@ class Agent:
             idle_shot = not self.offense and hp < self.P["regen_hp"] and d > 120 \
                 and not self.aims_at_me(th, memory=8.0) and th.hp / max(1.0, th.max_hp) > 0.3
             fmin = self.P["fire_min_off"] if self.offense else self.P["fire_min"]
-            if getattr(self, "fleeing", False) and d > self.P["flee_fire_r"] and not self.aims_at_me(th, memory=8.0):
+            e2_on = self.P["e2"] and self.P["e2_t0"] <= self.t <= self.P["e2_t1"] and d > self.P["e2_fire_r"]
+            if (e2_on or getattr(self, "fleeing", False) and d > self.P["flee_fire_r"]) \
+                    and not self.aims_at_me(th, memory=8.0):
                 idle_shot = True
             if self.P["surv"] and d > self.P["surv_fire_r"] and not self.aims_at_me(th, memory=8.0):
                 idle_shot = True
