@@ -107,6 +107,18 @@ DEFAULTS = {
     "laser_hold": 0.75,      # laser charge (s) to release at on an exposed target
     "cube_grab": 1,          # walk straight onto visible cubes within cube_grab_r (3.5 m pickup radius)
     "cube_grab_r": 40.0,
+    "flee": 0,               # between flee_t0 and flee_t1 s: stop seeking fights, break sight, run from hunters
+    "flee_t0": 200.0,
+    "flee_t1": 325.0,
+    "w_flee": 30.0,
+    "flee_cov": 2.0,
+    "flee_fire_r": 60.0,
+    "edge": 0,               # after edge_t0 s: hold edge_m inside the gas edge so chasers burn
+    "edge_t0": 265.0,
+    "edge_m": 12.0,
+    "w_edge": 15.0,
+    "lure": 0,               # with hunters near, prefer ~58 m from known drones (45 m aggro) so chasers draw fire
+    "w_lure": 15.0,
     "drop_grab": 0,          # walk onto a landed, unheld supply drop (3 cubes + full HP) within drop_grab_r
     "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
@@ -726,6 +738,10 @@ class Agent:
             W["cross"] *= P["duel_cov"]
         if P["surv"]:
             W["dist"] *= P["surv_dist"]
+        self.fleeing = bool(P["flee"]) and P["flee_t0"] <= self.t <= P["flee_t1"]
+        if self.fleeing:
+            W["dist"] = 0.0
+            W["cover"] *= P["flee_cov"]
         if self.hiding:
             W["cover"] *= P["amb_cov"]
             W["dist"] *= P["amb_dist"]
@@ -1008,6 +1024,17 @@ class Agent:
         if self.grab_pt is not None:
             dgc = np.hypot(X - self.grab_pt[0], Y - self.grab_pt[1])
             U = U + P["w_grab"] * np.clip(1.0 - dgc / max(math.dist(self.grab_pt, (x, y)), 1.0), 0.0, 1.0)
+        if self.fleeing:
+            U = U + P["w_flee"] * f_vor
+        if P["edge"] and self.t >= P["edge_t0"]:
+            U = U + P["w_edge"] * np.exp(-(((rp - dp) - P["edge_m"]) ** 2) / 72.0) * (dp < rp)
+        if P["lure"] and any(th.id < 100 and not th.est and self.t - th.seen < 1.0 and dmeE[th.id] < 150.0
+                             for th in enemies):
+            drones = [th.pos[:2] for th in self.threats.values() if th.id >= 100 and self.t - th.seen < 30.0]
+            if drones:
+                Dd = np.array(drones)
+                dd = np.min(np.hypot(X[:, None] - Dd[None, :, 0], Y[:, None] - Dd[None, :, 1]), axis=1)
+                U = U + P["w_lure"] * np.exp(-((dd - 58.0) ** 2) / 128.0) - P["w_lure"] * (dd < 45.0)
         if P["surv"]:
             U = U + P["w_center"] * np.clip(1.0 - dn / max(nr, 1.0), 0.0, 1.0)
         if self.hiding and P["w_hold"] > 0:
@@ -1046,6 +1073,9 @@ class Agent:
             threatened or urg >= 1.0 or not me.get("in_zone", True))
         if duel_th is not None and P["duel_boost"] and dmeE[duel_th.id] > P["duel_r"] + 15 \
                 and me["energy"] > 20 and h[0] * (duel_th.pos[0] - x) + h[1] * (duel_th.pos[1] - y) > 0:
+            boost, mag = True, 1.0
+        if self.fleeing and me["energy"] > 20 and any(th.id < 100 and not th.est and dmeE[th.id] < 120.0
+                                                      and self.t - th.seen < 1.0 for th in enemies):
             boost, mag = True, 1.0
         if gunners and min(dmeE[th.id] for th in gunners) < P["dodge_boost_r"] and me["energy"] > 15:
             boost, mag = True, 1.0
@@ -1179,6 +1209,8 @@ class Agent:
             idle_shot = not self.offense and hp < self.P["regen_hp"] and d > 120 \
                 and not self.aims_at_me(th, memory=8.0) and th.hp / max(1.0, th.max_hp) > 0.3
             fmin = self.P["fire_min_off"] if self.offense else self.P["fire_min"]
+            if getattr(self, "fleeing", False) and d > self.P["flee_fire_r"] and not self.aims_at_me(th, memory=8.0):
+                idle_shot = True
             if self.P["surv"] and d > self.P["surv_fire_r"] and not self.aims_at_me(th, memory=8.0):
                 idle_shot = True
             if getattr(self, "hiding", False) and d > self.P["amb_fire_r"]:
