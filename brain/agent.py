@@ -118,6 +118,15 @@ DEFAULTS = {
     "edge_m": 12.0,
     "w_edge": 15.0,
     "lure": 0,
+    "e3": 0,                 # E3: keep >= e3_r from every house mech seen in the last 2 s
+    "e3_r": 65.0,
+    "w_easy": 20.0,
+    "e4": 0,                 # E4: from e4_t0 boost only above e4_res energy, except escapes below e4_hp
+    "e4_t0": 190.0,
+    "e4_res": 60.0,
+    "e4_hp": 0.5,
+    "drop_t0": 0.0,          # E5: only chase drops after this time
+    "drop_safe": 0,          # E5: skip drops while a house mech was seen within 120 m in the last 3 s
     "e2": 0,                 # E2: in [e2_t0, e2_t1] move out of sight of every house bot seen in e2_mem s
     "e2_t0": 185.0,
     "e2_t1": 330.0,
@@ -780,7 +789,9 @@ class Agent:
                         best_g = (dg, (float(pk["pos"][0]), float(pk["pos"][1])))
                 if best_g is not None:
                     self.grab_pt = best_g[1]
-        if self.grab_pt is None and P["drop_grab"]:
+        if self.grab_pt is None and P["drop_grab"] and self.t >= P["drop_t0"] and not (
+                P["drop_safe"] and any(th.id < 100 and not th.est and self.t - th.seen < 3.0
+                                       and dmeE[th.id] < 120.0 for th in enemies)):
             best_d = None
             for dr in obs.get("drops", []):
                 q = dr["pos"]
@@ -1066,6 +1077,11 @@ class Agent:
             U = U + P["w_center"] * np.clip(1.0 - dn / max(nr, 1.0), 0.0, 1.0)
         if f_vis is not None:
             U = U - P["w_vis"] * f_vis
+        if P["e3"]:
+            near3 = [th for th in enemies if th.id < 100 and not th.est and self.t - th.seen < 2.0]
+            if near3:
+                dmin = np.min([np.hypot(X - th.pos[0], Y - th.pos[1]) for th in near3], axis=0)
+                U = U - P["w_easy"] * np.clip((P["e3_r"] - dmin) / P["e3_r"], 0.0, 1.0)
         if self.hiding and P["w_hold"] > 0:
             U = U + P["w_hold"] * f_cover * (dist < 1.5) + W["kin"] * 0.4 * still
         # under fire, hold a direction for 0.6-1.1 s: flipping every tick cancels our speed
@@ -1098,7 +1114,8 @@ class Agent:
         self.heading = h
         mag = 1.0 if L >= 3.0 else max(0.3, L / 3.0)
         threatened = bool(locks or incoming or shooter_near)
-        boost = me["energy"] > P["energy_reserve"] and (
+        res = P["e4_res"] if P["e4"] and self.t >= P["e4_t0"] else P["energy_reserve"]
+        boost = me["energy"] > res and (
             threatened or urg >= 1.0 or not me.get("in_zone", True))
         if duel_th is not None and P["duel_boost"] and dmeE[duel_th.id] > P["duel_r"] + 15 \
                 and me["energy"] > 20 and h[0] * (duel_th.pos[0] - x) + h[1] * (duel_th.pos[1] - y) > 0:
@@ -1107,6 +1124,8 @@ class Agent:
                                                       and self.t - th.seen < 1.0 for th in enemies):
             boost, mag = True, 1.0
         if gunners and min(dmeE[th.id] for th in gunners) < P["dodge_boost_r"] and me["energy"] > 15:
+            boost, mag = True, 1.0
+        if P["e4"] and self.t >= P["e4_t0"] and hp < P["e4_hp"] and threatened and me["energy"] > 10:
             boost, mag = True, 1.0
         # acoustic stealth: no combat in sight and no zone pressure -> walk at <= 5 m/s, no boost
         recent = any(not th.est and self.t - th.seen < 3.0 for th in enemies if th.id < 100)
