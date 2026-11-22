@@ -121,6 +121,11 @@ DEFAULTS = {
     "grab_safe": 0,          # only grab when no gunner is within 100 m
     "take_any": 1,           # take the weapon even with a shooter aiming at us
     "amb_urg": 0.4,
+    "retreat": 1,            # 2+ distinct attackers in ret_win s -> favour cover over range and boost out
+    "ret_win": 5.0,
+    "ret_n": 2,
+    "ret_cov": 3.0,
+    "ret_dist": 0.3,
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
     "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
@@ -742,6 +747,11 @@ class Agent:
             W["cross"] *= P["duel_cov"]
         if P["surv"]:
             W["dist"] *= P["surv_dist"]
+        swarm = bool(P["retreat"]) and sum(
+            1 for a, ta in self.attackers.items() if a < 100 and self.t - ta < P["ret_win"]) >= P["ret_n"]
+        if swarm:
+            W["cover"] *= P["ret_cov"]
+            W["dist"] *= P["ret_dist"]
         if self.hiding:
             W["cover"] *= P["amb_cov"]
             W["dist"] *= P["amb_dist"]
@@ -1073,6 +1083,8 @@ class Agent:
             threatened or urg >= 1.0 or not me.get("in_zone", True))
         if duel_th is not None and P["duel_boost"] and dmeE[duel_th.id] > P["duel_r"] + 15 \
                 and me["energy"] > 20 and h[0] * (duel_th.pos[0] - x) + h[1] * (duel_th.pos[1] - y) > 0:
+            boost, mag = True, 1.0
+        if swarm and me["energy"] > 15:
             boost, mag = True, 1.0
         if gunners and min(dmeE[th.id] for th in gunners) < P["dodge_boost_r"] and me["energy"] > 15:
             boost, mag = True, 1.0
