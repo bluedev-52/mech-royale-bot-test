@@ -80,8 +80,8 @@ DEFAULTS = {
     "w_arc": 0.0,
     "loot_r": 200.0,
     "loot_mem": 1,
-    "mortar_ok": 0,
-    "swap_mortar": 0,
+    "mortar_ok": 1,
+    "swap_mortar": 1,
     "aim_tol": 2.2,
     "w_keep": 0.0,           # sniper: penalty for spots inside keep_r of any squad mech
     "keep_r": 120.0,          # gun fires when the aim error is within atan(aim_tol / d)
@@ -118,7 +118,7 @@ DEFAULTS = {
     "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
     "grab_mem": 0,           # keep heading for a wanted weapon pickup seen in the last 6 s when it drops out of view
     "grab_path": 0,          # walk a local nav field to a grab point the straight line cannot reach
-    "any_far": 0,            # with an empty slot, grab any weapon pickup up to any_far_r m (whole match)
+    "any_far": 1,            # with an empty slot, grab any weapon pickup up to any_far_r m (whole match)
     "any_far_r": 250.0,
     "laser_swap": 1,         # trade a carried lightning for a laser pickup
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
