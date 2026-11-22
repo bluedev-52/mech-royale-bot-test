@@ -118,6 +118,8 @@ DEFAULTS = {
     "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
     "grab_mem": 0,           # keep heading for a wanted weapon pickup seen in the last 6 s when it drops out of view
     "grab_path": 0,          # walk a local nav field to a grab point the straight line cannot reach
+    "any_far": 0,            # with an empty slot, grab any weapon pickup up to any_far_r m (whole match)
+    "any_far_r": 250.0,
     "laser_swap": 1,         # trade a carried lightning for a laser pickup
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
     "laser_far_r": 250.0,
@@ -781,6 +783,8 @@ class Agent:
                     gr = P["grab_r"]
                     if P["laser_far"] and pk["kind"] == "laser" and self.t < P["laser_far_t"]:
                         gr = max(gr, P["laser_far_r"])
+                    if P["any_far"] and None in kinds0:
+                        gr = max(gr, P["any_far_r"])
                     if dg < gr and (best_g is None or dg < best_g[0]):
                         best_g = (dg, (float(pk["pos"][0]), float(pk["pos"][1])))
                 if best_g is not None:
