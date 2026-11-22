@@ -111,23 +111,6 @@ DEFAULTS = {
     "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
-    "crowd": 1,              # steer away from spots with crowd_n+ fresh rivals within crowd_r m (zone veto still applies)
-    "crowd_n": 3,
-    "crowd_r": 90.0,
-    "w_crowd": 15.0,
-    "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
-    "grab_mem": 0,           # keep heading for a wanted weapon pickup seen in the last 6 s when it drops out of view
-    "grab_path": 0,          # walk a local nav field to a grab point the straight line cannot reach
-    "rear_sector": 0,        # torso guard: turn to the 45-deg sector with the most incoming damage (held guard_hold s)
-    "guard_dmg": 90.0,       # incoming damage in the last guard_win s that triggers a turn to a sector off the front arc
-    "guard_win": 1.5,
-    "guard_hold": 0.8,
-    "any_far": 1,            # with an empty slot, grab any weapon pickup up to any_far_r m (whole match)
-    "any_far_r": 250.0,
-    "laser_swap": 1,         # trade a carried lightning for a laser pickup
-    "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
-    "laser_far_r": 250.0,
-    "laser_far_t": 240.0,
     "w_grab": 40.0,          # utility of closing on the grab point
     "grab_safe": 0,          # only grab when no gunner is within 100 m
     "take_any": 1,           # take the weapon even with a shooter aiming at us
@@ -255,8 +238,6 @@ class Agent:
         self.offense = self.P.get("style") == "offense"
         self.crates: List[dict] = []
         self.rear_hits: List[Tuple[float, float, Optional[int]]] = []
-        self.dmg_log: List[Tuple[float, float, float, Optional[int]]] = []
-        self.guard: Optional[Tuple[float, float, Optional[int]]] = None
         self.flip = 1.0
         self.flip_t = 0.0
         self.loot_mem: Dict[int, Tuple[str, Tuple[float, float, float], float]] = {}
@@ -428,8 +409,6 @@ class Agent:
                 self.last_hit_t = t
                 if e.get("bearing") is not None:
                     self.last_dmg_bearing = (e["bearing"], t)
-                    self.dmg_log = [r for r in self.dmg_log if t - r[1] < 4.0]
-                    self.dmg_log.append((e["bearing"], t, float(e.get("amount", 0)), e.get("by")))
                     if e.get("rear"):
                         self.rear_hits = [r for r in self.rear_hits if t - r[1] < 2.0]
                         self.rear_hits.append((e["bearing"], t, e.get("by")))
@@ -548,24 +527,6 @@ class Agent:
                 if perp < 12:
                     out.append((p.get("kind", "gun"), pos, vel, along / sp))
         return out
-
-    def _grab_steer(self, x: float, y: float):
-        nav = self.nav
-        key = (round(self.grab_pt[0], 1), round(self.grab_pt[1], 1))
-        if getattr(self, "_gf_key", None) != key:
-            gc = nav.nearest_walk(*self.grab_pt)
-            if gc is None:
-                return None
-            J, I = nav.cell(x, y)
-            m = 12
-            win = (max(0, min(J, gc[0]) - m), min(nav.NY, max(J, gc[0]) + m + 1),
-                   max(0, min(I, gc[1]) - m), min(nav.NX, max(I, gc[1]) + m + 1))
-            goal = np.zeros_like(nav.walk)
-            goal[gc[0], gc[1]] = True
-            f = NavField(nav, goal, window=win)
-            f.run(max_iters=80)
-            self._gf_key, self._gf = key, f
-        return self._gf.steer(x, y)
 
     def update_cover(self, srcs: List[Threat]) -> None:
         """Tactical anchor: local field (~70 m) of walking distance to cells shielded from srcs."""
@@ -779,21 +740,11 @@ class Agent:
                                           and dmeE[th.id] < 100.0 for th in enemies)
             if pref0 and not busy:
                 best_g = None
-                cand_pk = list(obs.get("pickups", []))
-                if P["grab_mem"]:
-                    vis = {pk["id"] for pk in cand_pk}
-                    cand_pk += [{"id": k, "kind": v[0], "pos": v[1]} for k, v in self.loot_mem.items()
-                                if k not in vis and self.t - v[2] < 6.0]
-                for pk in cand_pk:
+                for pk in obs.get("pickups", []):
                     if pk["kind"] in kinds0 or pk["kind"] not in pref0 or abs(pk["pos"][2] - z) > 3.5:
                         continue
                     dg = math.dist(pk["pos"][:2], (x, y))
-                    gr = P["grab_r"]
-                    if P["laser_far"] and pk["kind"] == "laser" and self.t < P["laser_far_t"]:
-                        gr = max(gr, P["laser_far_r"])
-                    if P["any_far"] and None in kinds0:
-                        gr = max(gr, P["any_far_r"])
-                    if dg < gr and (best_g is None or dg < best_g[0]):
+                    if dg < P["grab_r"] and (best_g is None or dg < best_g[0]):
                         best_g = (dg, (float(pk["pos"][0]), float(pk["pos"][1])))
                 if best_g is not None:
                     self.grab_pt = best_g[1]
@@ -828,12 +779,6 @@ class Agent:
                 pts.append((x + (gx - x) / dg0 * 16.0, y + (gy - y) / dg0 * 16.0))
             else:
                 pts.append(self.grab_pt)
-        self._gp_idx = None
-        if self.grab_pt is not None and P["grab_path"] and not self.nav.clear_line(x, y, *self.grab_pt):
-            d = self._grab_steer(x, y)
-            if d is not None:
-                self._gp_idx = len(pts)
-                pts.append((x + d[0] * 12.0, y + d[1] * 12.0))
         n = len(pts)
         C = np.array(pts)
         X, Y = C[:, 0], C[:, 1]
@@ -1056,26 +1001,13 @@ class Agent:
         stale = np.minimum(self.t - self.look_age[ang], 8.0) / 8.0 * (dist > 0.1)
         f_space = 0.5 * f_vor + 0.3 * f_per + 0.2 * stale
 
-        if P["crowd"] and mechs:
-            fresh = [th for th in mechs if self.t - th.seen < 8.0]
-            if sum(math.dist(th.pos[:2], (x, y)) < P["crowd_r"] * 1.3 for th in fresh) >= P["crowd_n"]:
-                Mf = np.array([th.pos[:2] for th in fresh])
-                dm = np.hypot(X[:, None] - Mf[None, :, 0], Y[:, None] - Mf[None, :, 1])
-                dens = np.clip(1.0 - dm / P["crowd_r"], 0.0, 1.0).sum(axis=1)
-                U_crowd = np.clip((dens - (P["crowd_n"] - 2) * 0.5) / P["crowd_n"], 0.0, 1.0)
-            else:
-                U_crowd = np.zeros(n)
-        else:
-            U_crowd = np.zeros(n)
-        U = (- P["w_crowd"] * U_crowd - W["zone"] * f_zone - W["cross"] * alpha * f_cross - W["aoe"] * f_aoe
+        U = (- W["zone"] * f_zone - W["cross"] * alpha * f_cross - W["aoe"] * f_aoe
              - W["trap"] * f_trap - W["kin"] * f_kin + W["cover"] * alpha * f_cover
              + W["dist"] * f_dist + W["loot"] * beta * f_loot + W["space"] * f_space
              + P["w_dodge"] * f_dodge - P["w_arc"] * f_arc - P["w_keep"] * f_keep)
         if self.grab_pt is not None:
             dgc = np.hypot(X - self.grab_pt[0], Y - self.grab_pt[1])
             U = U + P["w_grab"] * np.clip(1.0 - dgc / max(math.dist(self.grab_pt, (x, y)), 1.0), 0.0, 1.0)
-        if self._gp_idx is not None:
-            U[self._gp_idx] += P["w_grab"]
         if P["surv"]:
             U = U + P["w_center"] * np.clip(1.0 - dn / max(nr, 1.0), 0.0, 1.0)
         if self.hiding and P["w_hold"] > 0:
@@ -1140,8 +1072,6 @@ class Agent:
                 return {"lightning" if other[0] == "laser" else "laser": 1.0}
         if self.P["swap_mortar"] and "mortar" in kinds:
             return {"lightning": 0.9, "laser": 0.9}
-        if self.P["laser_swap"] and "lightning" in kinds and "laser" not in kinds:
-            return {"laser": 1.0}
         return {}
 
     def loot_objects(self, obs: dict, kinds) -> List[Tuple[float, float, float]]:
@@ -1216,68 +1146,11 @@ class Agent:
             return {}
         if None in kinds:
             return {"take": best[1]}
-        if self.P["laser_swap"] and "lightning" in kinds and "laser" in want:
-            slot = kinds.index("lightning")
-        else:
-            slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
+        slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
         w = weapons[slot]
         if w.get("cooldown", 0) > 0.5:
             return {}
         return {"take": best[1], "drop": slot}
-
-    def dmg_sectors(self, win: float):
-        """Incoming damage of the last win s binned in 8 sectors of 45 deg (each hit also counts half
-        in the two neighbours, bearing noise is ~7 deg); returns (yaw, damage, attacker) of the top sector."""
-        t = self.t
-        acc = np.zeros(8)
-        who: Dict[int, Dict] = {}
-        for b, tt, a, by in self.dmg_log:
-            if t - tt > win:
-                continue
-            k = int(round(b / (math.pi / 4))) % 8
-            for dk, wgt in ((0, 1.0), (-1, 0.5), (1, 0.5)):
-                acc[(k + dk) % 8] += a * wgt
-            who.setdefault(k, {})
-            if by is not None:
-                who[k][by] = who[k].get(by, 0.0) + a
-        if acc.max() <= 0:
-            return None
-        k = int(acc.argmax())
-        bs = [b for b, tt, a, by in self.dmg_log if t - tt <= win and min((int(round(b / (math.pi / 4))) - k) % 8,
-                                                                         (k - int(round(b / (math.pi / 4)))) % 8) <= 1]
-        yaw = math.atan2(sum(math.sin(b) for b in bs), sum(math.cos(b) for b in bs)) if bs else k * math.pi / 4
-        att = {}
-        for dk in (-1, 0, 1):
-            for by, a in who.get((k + dk) % 8, {}).items():
-                att[by] = att.get(by, 0.0) + a
-        return yaw, float(acc[k]), (max(att, key=att.get) if att else None)
-
-    def guard_sector(self, target):
-        """Hold the front arc on the sector hurting us most when it lies off the arc and outweighs the
-        damage coming from the firing target; keep that guard guard_hold s to avoid flicking."""
-        t = self.t
-        P = self.P
-        if self.guard is not None and t < self.guard[1]:
-            return self.guard[0], self.guard[2]
-        self.guard = None
-        sec = self.dmg_sectors(P["guard_win"])
-        if sec is None or sec[1] < P["guard_dmg"]:
-            return None
-        yaw_s, dmg, by = sec
-        yaw = float(self.me["aim"][0])
-        if abs(wrap(yaw_s - yaw)) < math.pi / 2:
-            return None
-        if target is not None:
-            th = target[0]
-            if by == th.id:
-                return None
-            tb = math.atan2(th.pos[1] - self.pos[1], th.pos[0] - self.pos[0])
-            from_t = sum(a for b, tt, a, b2 in self.dmg_log
-                         if t - tt <= P["guard_win"] and abs(wrap(b - tb)) < math.pi / 4)
-            if dmg < 1.5 * from_t or th.hp / max(1.0, th.max_hp) <= 0.3:
-                return None
-        self.guard = (yaw_s, t + P["guard_hold"], by)
-        return yaw_s, by
 
     # ================================================================== aim / fire
     def plan_aim_fire(self, locks, target):
@@ -1287,17 +1160,8 @@ class Agent:
         eye = (x, y, z + me["stats"].get("muzzle_height", self.mech.get("muzzle_height", 7.0)))
         weapons = me["weapons"]
         kinds = [w["kind"] if w else None for w in weapons]
-        if self.P["rear_sector"]:
-            g = self.guard_sector(target)
-            if g is not None:
-                yaw_g, by = g
-                src = self.threats.get(by) if by is not None else None
-                if src is not None and t - src.seen < 5.0 and not src.est:
-                    return self.weapon_choice(src, weapons, kinds, eye, math.dist(src.pos[:2], (x, y)), False,
-                                              self._shot_clear(np.array(eye), src))
-                return [yaw_g, 0.0], [False, False]
         rear = [r for r in self.rear_hits if t - r[1] < 1.2]
-        if not self.P["rear_sector"] and len(rear) >= 2 and (target is None or (rear[-1][2] != target[0].id
+        if len(rear) >= 2 and (target is None or (rear[-1][2] != target[0].id
                                                   and target[0].hp / max(1.0, target[0].max_hp) > 0.3)):
             # taking x1.5 hits from behind: turn the front arc to that attacker and shoot back
             src = self.threats.get(rear[-1][2]) if rear[-1][2] is not None else None
@@ -1336,10 +1200,6 @@ class Agent:
                      * math.exp(-(t - th.seen) / self.P["decay_s"]))
             if t - th.seen < 4.0:
                 return list(yaw_pitch(eye, (th.pos[0], th.pos[1], th.pos[2] + 4.5))), [False, False]
-        if self.P["rear_sector"] and self.dmg_log:
-            sec = self.dmg_sectors(4.0)
-            if sec is not None:
-                return [sec[0], 0.0], [False, False]
         if self.last_dmg_bearing and t - self.last_dmg_bearing[1] < 3.0:
             return [self.last_dmg_bearing[0], 0.0], [False, False]
         if self.blobs:
@@ -1416,10 +1276,7 @@ class Agent:
             return aim, fire
         if short:
             return aim, fire
-        close_gun = (self.P["laser_min_d"] > 0 and d < self.P["laser_min_d"] and "gun" in kinds
-                     and "laser" in kinds and float(weapons[kinds.index("laser")].get("charge", 0)) <= 0
-                     and weapons[kinds.index("gun")].get("ammo", 1) > 0)
-        if "laser" in kinds and d <= 280 and clear and not close_gun:
+        if "laser" in kinds and d <= 280 and clear:
             s = kinds.index("laser")
             w = weapons[s]
             err = abs(wrap(aim[0] - me["aim"][0])) + abs(aim[1] - me["aim"][1])
