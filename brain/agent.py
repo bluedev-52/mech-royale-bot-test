@@ -154,7 +154,8 @@ DEFAULTS = {
     "k5_hp": 0.4,
     "k5_quiet": 3.0,         # only when nothing hit us for this long
     "k5_mem": 20.0,
-    "k5_look": 1,            # aim at the peek goal instead of scanning
+    "k5_look": 1,
+    "k5_x": 0.0,             # with nothing heard or remembered: utility of open (far-seeing) cells, half of it toward the next zone centre            # aim at the peek goal instead of scanning
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
     "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
@@ -642,13 +643,17 @@ class Agent:
             return False
         return self.t - self.aimed.get(th.id, -1e9) >= m
 
-    def peek_goal(self, me: dict):
+    def k5_ready(self, me: dict) -> bool:
         P = self.P
         if not P["k5"] or not me.get("in_zone", True) or self.zone_urgency() >= 0.5:
-            return None
+            return False
         if me["hp"] / max(1.0, me["max_hp"]) <= P["k5_hp"] or self.t - self.last_hit_t < P["k5_quiet"]:
-            return None
-        if any(0 <= th.id < 100 and not th.est and self.t - th.seen < 2.0 for th in self.threats.values()):
+            return False
+        return not any(0 <= th.id < 100 and not th.est and self.t - th.seen < 2.0 for th in self.threats.values())
+
+    def peek_goal(self, me: dict):
+        P = self.P
+        if not self.k5_ready(me):
             return None
         best = None
         for bx, by, bt, k, w in self.blobs:
@@ -1137,6 +1142,11 @@ class Agent:
             U = U + P["w_peek"] * (vis5 & band)
             if not (vis5 & band).any() and not seeking:
                 U = U + P["w_seek"] * np.clip(1.0 - dpg / max(math.dist(pg, (x, y)), 1.0), 0.0, 1.0)
+        elif P["k5_x"] and self.k5_ready(me):
+            Jx, Ix = self._cells(X, Y)
+            U = U + P["k5_x"] * self.nav.openness[Jx, Ix]
+            dgz = np.hypot(X - nc[0], Y - nc[1])
+            U = U + 0.5 * P["k5_x"] * np.clip(1.0 - dgz / max(math.dist(nc[:2], (x, y)), 1.0), 0.0, 1.0)
         k4a = self.k4_on("k4_app") and target is not None and target[0].id < 100 and self.free_mech(target[0])
         if P["k1"] and P["k1_app"] and self.k1_active() and target is not None and target[0].id < 100 \
                 and me.get("in_zone", True) and hp > (P["k4_app_hp"] if k4a else 0.5):
