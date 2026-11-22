@@ -116,6 +116,7 @@ DEFAULTS = {
     "crowd_r": 90.0,
     "w_crowd": 15.0,
     "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
+    "laser_swap": 0,         # trade a carried lightning for a laser pickup
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
     "laser_far_r": 150.0,
     "laser_far_t": 120.0,
@@ -1094,6 +1095,8 @@ class Agent:
                 return {"lightning" if other[0] == "laser" else "laser": 1.0}
         if self.P["swap_mortar"] and "mortar" in kinds:
             return {"lightning": 0.9, "laser": 0.9}
+        if self.P["laser_swap"] and "lightning" in kinds and "laser" not in kinds:
+            return {"laser": 1.0}
         return {}
 
     def loot_objects(self, obs: dict, kinds) -> List[Tuple[float, float, float]]:
@@ -1168,7 +1171,10 @@ class Agent:
             return {}
         if None in kinds:
             return {"take": best[1]}
-        slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
+        if self.P["laser_swap"] and "lightning" in kinds and "laser" in want:
+            slot = kinds.index("lightning")
+        else:
+            slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
         w = weapons[slot]
         if w.get("cooldown", 0) > 0.5:
             return {}
