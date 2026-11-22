@@ -111,6 +111,9 @@ DEFAULTS = {
     "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
+    "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
+    "laser_far_r": 150.0,
+    "laser_far_t": 120.0,
     "w_grab": 40.0,          # utility of closing on the grab point
     "grab_safe": 0,          # only grab when no gunner is within 100 m
     "take_any": 1,           # take the weapon even with a shooter aiming at us
@@ -744,7 +747,10 @@ class Agent:
                     if pk["kind"] in kinds0 or pk["kind"] not in pref0 or abs(pk["pos"][2] - z) > 3.5:
                         continue
                     dg = math.dist(pk["pos"][:2], (x, y))
-                    if dg < P["grab_r"] and (best_g is None or dg < best_g[0]):
+                    gr = P["grab_r"]
+                    if P["laser_far"] and pk["kind"] == "laser" and self.t < P["laser_far_t"]:
+                        gr = max(gr, P["laser_far_r"])
+                    if dg < gr and (best_g is None or dg < best_g[0]):
                         best_g = (dg, (float(pk["pos"][0]), float(pk["pos"][1])))
                 if best_g is not None:
                     self.grab_pt = best_g[1]
