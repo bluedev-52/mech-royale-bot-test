@@ -148,7 +148,7 @@ DEFAULTS = {
     "k4_app": 1,             # wider short approach toward free targets; only hostile mechs block it
     "k4_app_r": (60.0, 230.0),
     "k4_app_hp": 0.4,
-    "k5": 0,                 # K5: peek. With no mech in sight, move to points with line of sight to the latest heard/remembered mech
+    "k5": 1,                 # K5: peek. With no mech in sight, move to points with line of sight to the latest heard/remembered mech
     "w_peek": 40.0,
     "k5_r": (40.0, 190.0),   # peek distance band to the goal
     "k5_hp": 0.4,
