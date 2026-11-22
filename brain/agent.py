@@ -111,6 +111,10 @@ DEFAULTS = {
     "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
+    "crowd": 0,              # steer away from spots with crowd_n+ fresh rivals within crowd_r m (zone veto still applies)
+    "crowd_n": 3,
+    "crowd_r": 90.0,
+    "w_crowd": 15.0,
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
     "laser_far_r": 150.0,
     "laser_far_t": 120.0,
@@ -1007,7 +1011,18 @@ class Agent:
         stale = np.minimum(self.t - self.look_age[ang], 8.0) / 8.0 * (dist > 0.1)
         f_space = 0.5 * f_vor + 0.3 * f_per + 0.2 * stale
 
-        U = (- W["zone"] * f_zone - W["cross"] * alpha * f_cross - W["aoe"] * f_aoe
+        if P["crowd"] and mechs:
+            fresh = [th for th in mechs if self.t - th.seen < 8.0]
+            if sum(math.dist(th.pos[:2], (x, y)) < P["crowd_r"] * 1.3 for th in fresh) >= P["crowd_n"]:
+                Mf = np.array([th.pos[:2] for th in fresh])
+                dm = np.hypot(X[:, None] - Mf[None, :, 0], Y[:, None] - Mf[None, :, 1])
+                dens = np.clip(1.0 - dm / P["crowd_r"], 0.0, 1.0).sum(axis=1)
+                U_crowd = np.clip((dens - (P["crowd_n"] - 2) * 0.5) / P["crowd_n"], 0.0, 1.0)
+            else:
+                U_crowd = np.zeros(n)
+        else:
+            U_crowd = np.zeros(n)
+        U = (- P["w_crowd"] * U_crowd - W["zone"] * f_zone - W["cross"] * alpha * f_cross - W["aoe"] * f_aoe
              - W["trap"] * f_trap - W["kin"] * f_kin + W["cover"] * alpha * f_cover
              + W["dist"] * f_dist + W["loot"] * beta * f_loot + W["space"] * f_space
              + P["w_dodge"] * f_dodge - P["w_arc"] * f_arc - P["w_keep"] * f_keep)
