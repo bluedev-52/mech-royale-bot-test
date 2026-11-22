@@ -122,7 +122,7 @@ DEFAULTS = {
     "take_any": 1,           # take the weapon even with a shooter aiming at us
     "amb_urg": 0.4,
     "retreat": 1,            # 2+ distinct attackers in ret_win s -> favour cover over range and boost out
-    "ret_win": 5.0,
+    "ret_win": 8.0,
     "ret_n": 2,
     "ret_cov": 3.0,
     "ret_dist": 0.3,
