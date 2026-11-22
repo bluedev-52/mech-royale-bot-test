@@ -137,6 +137,17 @@ DEFAULTS = {
     "k1_app": 1,             # short approach toward a favourable target
     "k1_app_r": (110.0, 170.0),
     "w_k1app": 25.0,
+    "k4": 0,                 # K4: more kills. Master switch for the k4_* options below
+    "k4_free": 1,            # prefer mechs that have not hit or aimed at us lately (squad non-hunters ignore us)
+    "k4_w": 0.8,             # target bonus for such a "free" mech
+    "k4_mem": 8.0,           # s without hitting/aiming at us to count as free
+    "k4_all": 1,             # keep K1 targeting/approach for the whole match, not only before k1_t
+    "k4_seek": 1,            # hunt the whole match: seek past seek_t, at lower HP, toward remembered free mechs
+    "k4_seek_hp": 0.35,
+    "k4_seek_mem": 20.0,     # remembered mech positions this recent are seek goals
+    "k4_app": 1,             # wider short approach toward free targets; only hostile mechs block it
+    "k4_app_r": (60.0, 230.0),
+    "k4_app_hp": 0.4,
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
     "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
@@ -337,6 +348,7 @@ class Agent:
     def update_zone(self, obs: dict) -> None:
         z = obs["zone"]
         nc, nr = z["next_center"], z["next_radius"]
+        self.zone_r_next = self.safe_radius(nr)
         key = (round(nc[0], 1), round(nc[1], 1), round(nr, 1))
         if self.field_key != key and (self.pending is None or self.pending[0] != key):
             goal = self.nav.circle_mask(nc[0], nc[1], self.safe_radius(nr))
@@ -611,6 +623,21 @@ class Agent:
         A = np.repeat(muzzle[None], len(hs), axis=0)
         return bool(self.world.los_batch(A, B, step=2.0).any())
 
+    def k4_on(self, opt: str) -> bool:
+        return bool(self.P["k4"]) and bool(self.P[opt])
+
+    def free_mech(self, th) -> bool:
+        """Observable only: no damage from it and no aim at us for k4_mem s."""
+        m = self.P["k4_mem"]
+        if self.aims_at_me(th, memory=0.0):
+            self.aimed[th.id] = self.t
+        if self.t - self.attackers.get(th.id, -1e9) < m:
+            return False
+        return self.t - self.aimed.get(th.id, -1e9) >= m
+
+    def k1_active(self) -> bool:
+        return bool(self.P["k1"]) and (self.t < self.P["k1_t"] or self.k4_on("k4_all"))
+
     def select_target(self) -> Optional[Tuple[Threat, float, bool]]:
         """S(e) = u_hit + u_finish (1 - h_e) + u_duel [aims at me] - u_obst, 10% hysteresis.
         Against the squad a member that hit us in the last 8 s is still hunting us."""
@@ -620,8 +647,10 @@ class Agent:
         muzzle = self.pos + np.array([0.0, 0.0, mh])
         scored: Dict[int, Tuple[float, Threat, bool]] = {}
         any_mech = any(0 <= th.id < 100 and not th.est and self.t - th.seen < 0.3 for th in self.threats.values())
-        k1 = bool(P["k1"]) and self.t < P["k1_t"]
-        fresh = [o for o in self.threats.values() if 0 <= o.id < 100 and not o.est and self.t - o.seen < 1.0] if k1 else []
+        k1 = self.k1_active()
+        k4f = self.k4_on("k4_free")
+        fresh = [o for o in self.threats.values() if 0 <= o.id < 100 and not o.est and self.t - o.seen < 1.0
+                 and not (k4f and self.free_mech(o))] if k1 else []
         for th in self.prey():
             if th.est or self.t - th.seen > 0.3:
                 continue
@@ -648,6 +677,8 @@ class Agent:
                 ttk = th.hp / max(1.0, P["k1_dps"] * hit * (1.0 if clear else 0.3))
                 others = sum(1 for o in fresh if o.id != th.id and math.dist(o.pos[:2], self.pos[:2]) < P["k1_risk_r"])
                 s += P["k1_w"] / (1.0 + ttk / P["k1_ttk0"]) - P["k1_risk"] * others
+            if k4f and th.id < 100 and self.free_mech(th):
+                s += P["k4_w"]
             scored[th.id] = (s, th, clear)
         if not scored:
             self.target_id = None
@@ -1063,13 +1094,15 @@ class Agent:
             if goal is not None:
                 dgs = np.hypot(X - goal[0], Y - goal[1])
                 U = U + P["w_seek"] * np.clip(1.0 - dgs / max(math.dist(goal, (x, y)), 1.0), 0.0, 1.0)
-        if P["k1"] and P["k1_app"] and self.t < P["k1_t"] and target is not None and target[0].id < 100 \
-                and me.get("in_zone", True) and hp > 0.5:
+        k4a = self.k4_on("k4_app") and target is not None and target[0].id < 100 and self.free_mech(target[0])
+        if P["k1"] and P["k1_app"] and self.k1_active() and target is not None and target[0].id < 100 \
+                and me.get("in_zone", True) and hp > (P["k4_app_hp"] if k4a else 0.5):
             tp = target[0].pos
             dtg = math.dist(tp[:2], (x, y))
-            lo, hi = P["k1_app_r"]
+            lo, hi = P["k4_app_r"] if k4a else P["k1_app_r"]
             near_others = sum(1 for th in enemies if th.id < 100 and th.id != target[0].id and not th.est
-                              and self.t - th.seen < 1.0 and dmeE[th.id] < P["k1_risk_r"])
+                              and self.t - th.seen < 1.0 and dmeE[th.id] < P["k1_risk_r"]
+                              and not (k4a and self.free_mech(th)))
             if lo < dtg < hi and near_others == 0:
                 dgt = np.hypot(X - tp[0], Y - tp[1])
                 U = U + P["w_k1app"] * np.clip((dtg - dgt) / max(dtg - lo, 1.0), 0.0, 1.0)
@@ -1137,7 +1170,9 @@ class Agent:
 
     def seeking_now(self, enemies, hp: float, me: dict) -> bool:
         P = self.P
-        if not P["seek"] or self.t >= P["seek_t"] or hp <= P["seek_hp"] or not me.get("in_zone", True):
+        k4s = self.k4_on("k4_seek")
+        if not P["seek"] or (self.t >= P["seek_t"] and not k4s) \
+                or hp <= (P["k4_seek_hp"] if k4s else P["seek_hp"]) or not me.get("in_zone", True):
             return False
         if self.zone_urgency() >= 0.5:
             return False
@@ -1152,6 +1187,12 @@ class Agent:
                 best = (bx, by, bt)
         if best is not None:
             return (best[0], best[1])
+        if self.k4_on("k4_seek"):
+            mem = [th for th in self.threats.values() if 0 <= th.id < 100 and self.t - th.seen < self.P["k4_seek_mem"]
+                   and math.dist(th.pos[:2], nc[:2]) < self.zone_r_next]
+            if mem:
+                th = min(mem, key=lambda o: (not self.free_mech(o), math.dist(o.pos[:2], self.pos[:2])))
+                return (float(th.pos[0]), float(th.pos[1]))
         if self.P["seek_zone"]:
             return (float(nc[0]), float(nc[1]))
         return None
