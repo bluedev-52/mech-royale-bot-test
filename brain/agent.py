@@ -80,8 +80,8 @@ DEFAULTS = {
     "w_arc": 0.0,
     "loot_r": 200.0,
     "loot_mem": 1,
-    "mortar_ok": 1,
-    "swap_mortar": 1,
+    "mortar_ok": 0,
+    "swap_mortar": 0,
     "aim_tol": 2.2,
     "w_keep": 0.0,           # sniper: penalty for spots inside keep_r of any squad mech
     "keep_r": 120.0,          # gun fires when the aim error is within atan(aim_tol / d)
