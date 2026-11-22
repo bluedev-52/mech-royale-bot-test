@@ -120,7 +120,16 @@ DEFAULTS = {
     "w_grab": 40.0,          # utility of closing on the grab point
     "grab_safe": 0,          # only grab when no gunner is within 100 m
     "take_any": 1,           # take the weapon even with a shooter aiming at us
-    "amb_urg": 0.4,          # stop hiding once zone urgency reaches this
+    "amb_urg": 0.4,
+    "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
+    "keep_mem": 30.0,
+    "seek": 0,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
+    "seek_t": 200.0,         # seek only before this match time
+    "seek_mem": 8.0,         # follow sounds heard this recently
+    "w_seek": 30.0,          # utility of closing on the seek goal
+    "seek_hp": 0.5,          # seek only above this HP fraction
+    "seek_aoe": 0.0,         # multiplier on the combat-sound avoidance while seeking
+    "seek_zone": 1,          # with no sound to follow, drift toward the next zone centre          # stop hiding once zone urgency reaches this
     "amb_fire_r": 999.0,     # while hiding, hold fire beyond this range unless shot recently
 }
 
@@ -237,6 +246,7 @@ class Agent:
         self.unstick_until = -1.0
         self.unstick_dir = (1.0, 0.0)
         self.scan_yaw: Optional[float] = None
+        self.aimed: Dict[int, float] = {}
         self.scan_t = 0.0
         self.look_age = np.zeros(NDIR)
         self.mode = "early"
@@ -884,8 +894,9 @@ class Agent:
             L = math.hypot(bx, by) or 1.0
             lat = np.abs((X - th.pos[0]) * by - (Y - th.pos[1]) * bx) / L
             f_aoe = np.maximum(f_aoe, exposed * (0.5 + 0.5 * np.clip(1.0 - lat / 8.0, 0.0, 1.0)))
+        seeking = self.seeking_now(enemies, hp, me)
         for bx, by, bt, k, w in self.blobs:
-            if k in COMBAT_SOUNDS and self.t - bt < 3.0:
+            if k in COMBAT_SOUNDS and self.t - bt < 3.0 and not (seeking and P["seek_aoe"] <= 0):
                 # bearing error ~7 deg: the blob widens with its distance from us
                 spread = 25.0 + 0.12 * math.hypot(bx - x, by - y)
                 db = np.hypot(X - bx, Y - by)
@@ -945,7 +956,7 @@ class Agent:
         f_keep = np.zeros(n)
         if P["w_keep"] > 0:
             for th in enemies:
-                if th.id < 100 and self.t - th.seen < 4.0:
+                if th.id < 100 and self.t - th.seen < 4.0 and (not P["keep_hostile"] or self.hostile(th)):
                     dk = np.hypot(X - th.pos[0], Y - th.pos[1])
                     f_keep = f_keep + np.clip((P["keep_r"] - dk) / P["keep_r"], 0.0, 1.0)
         # ---------------------------------------------------------- f_dist
@@ -1016,6 +1027,11 @@ class Agent:
              - W["trap"] * f_trap - W["kin"] * f_kin + W["cover"] * alpha * f_cover
              + W["dist"] * f_dist + W["loot"] * beta * f_loot + W["space"] * f_space
              + P["w_dodge"] * f_dodge - P["w_arc"] * f_arc - P["w_keep"] * f_keep)
+        if seeking:
+            goal = self.seek_goal(nc)
+            if goal is not None:
+                dgs = np.hypot(X - goal[0], Y - goal[1])
+                U = U + P["w_seek"] * np.clip(1.0 - dgs / max(math.dist(goal, (x, y)), 1.0), 0.0, 1.0)
         if self.grab_pt is not None:
             dgc = np.hypot(X - self.grab_pt[0], Y - self.grab_pt[1])
             U = U + P["w_grab"] * np.clip(1.0 - dgc / max(math.dist(self.grab_pt, (x, y)), 1.0), 0.0, 1.0)
@@ -1063,10 +1079,38 @@ class Agent:
         # acoustic stealth: no combat in sight and no zone pressure -> walk at <= 5 m/s, no boost
         recent = any(not th.est and self.t - th.seen < 3.0 for th in enemies if th.id < 100)
         if not threatened and not recent and urg < 0.5 and me.get("in_zone", True) \
-                and self.t - self.last_hit_t > 5.0 and best_loot < 0.5:
+                and self.t - self.last_hit_t > 5.0 and best_loot < 0.5 and not seeking:
             mag = min(mag, P["silent_move"])
             boost = False
         return (h[0] * mag, h[1] * mag), boost, False
+
+    def hostile(self, th) -> bool:
+        if self.t - self.attackers.get(th.id, -1e9) < self.P["keep_mem"]:
+            return True
+        if self.aims_at_me(th, memory=0.0):
+            self.aimed[th.id] = self.t
+        return self.t - self.aimed.get(th.id, -1e9) < self.P["keep_mem"]
+
+    def seeking_now(self, enemies, hp: float, me: dict) -> bool:
+        P = self.P
+        if not P["seek"] or self.t >= P["seek_t"] or hp <= P["seek_hp"] or not me.get("in_zone", True):
+            return False
+        if self.zone_urgency() >= 0.5:
+            return False
+        return not any(th.id < 100 and not th.est and self.t - th.seen < 3.0 for th in enemies)
+
+    def seek_goal(self, nc):
+        best = None
+        for bx, by, bt, k, w in self.blobs:
+            if k in ("step", "boost", "jet", "reload") or self.t - bt > self.P["seek_mem"]:
+                continue
+            if best is None or bt > best[2]:
+                best = (bx, by, bt)
+        if best is not None:
+            return (best[0], best[1])
+        if self.P["seek_zone"]:
+            return (float(nc[0]), float(nc[1]))
+        return None
 
     # ================================================================== loot
     def weapon_pref(self, kinds) -> Dict[str, float]:
