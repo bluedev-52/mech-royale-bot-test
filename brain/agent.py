@@ -27,7 +27,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from brain.aim import lead, mortar_pitch, wrap, yaw_pitch
-from brain.crossfire import Crossfire
 from brain.nav import NavField, NavGrid
 from brain.world import World
 
@@ -112,6 +111,12 @@ DEFAULTS = {
     "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
+    "laser_swap": 1,         # trade a carried lightning for a laser pickup
+    "any_far": 1,            # with an empty slot, grab any weapon pickup up to any_far_r m (whole match)
+    "any_far_r": 250.0,
+    "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
+    "laser_far_r": 250.0,
+    "laser_far_t": 240.0,
     "w_grab": 40.0,          # utility of closing on the grab point
     "grab_safe": 0,          # only grab when no gunner is within 100 m
     "take_any": 1,           # take the weapon even with a shooter aiming at us
@@ -244,7 +249,6 @@ class Agent:
         self.loot_mem: Dict[int, Tuple[str, Tuple[float, float, float], float]] = {}
         self.commit_dir: Optional[Tuple[float, float]] = None
         self.commit_until = -1.0
-        self.crossfire = Crossfire(self.cfg)
 
     def _escape_map(self) -> np.ndarray:
         """Fraction of the 8 directions with at least two walkable steps (8 m) from each cell."""
@@ -273,13 +277,11 @@ class Agent:
             a["pick"] = self.pick_upgrade(obs["offer"])
         self.update_zone(obs)
         self.update_threats(obs)
-        self.crossfire.observe(obs)
         self.mode = self.phase()
         locks = self.laser_locks(obs)
         incoming = self.incoming(obs)
         target = self.select_target()
         move, boost, jump = self.plan_move(obs, locks, incoming, target)
-        boost, jump = self.movement_budget(move, boost, jump, locks, incoming)
         aim, fire = self.plan_aim_fire(locks, target)
         a.update(self.plan_take(obs, target))
         # proactive reload only with <= 4 rounds and nobody close (reload is heard at 60 m)
@@ -290,54 +292,7 @@ class Agent:
             a["reload"] = True
         a.update(move=[round(move[0], 4), round(move[1], 4)], boost=boost, jump=jump,
                  aim=[round(aim[0], 4), round(aim[1], 4)], fire=fire)
-        if self.crossfire.sample is not None and os.environ.get("MECH_LOCAL_METRICS") == "1":
-            a["debug"] = {"crossfire": self.crossfire.sample}
         return a
-
-    def movement_budget(self, move, boost, jump, locks, incoming):
-        """Hold mobility energy for urgent displacement or verified cover runs."""
-        me = self.me
-        energy, cap = me["energy"], me["max_energy"]
-        stats = me["stats"]
-        reserve = cap * 0.45
-        min_step = stats["boost_drain"] * 0.1
-        original = (boost, jump)
-        sample = self.crossfire.sample or {}
-        active = False
-        if jump or not me["grounded"]:
-            # A short jet can help clear a low ledge during unstick. Open-air ascent
-            # uses the reserve without shortening the route to ground cover.
-            tx, ty = self.pos[:2] + 4.0 * np.asarray(move)
-            z = float(self.pos[2])
-            top = self.world.roof_top(tx, ty)
-            blocked = not self.nav.clear_line(*self.pos[:2], tx, ty)
-            ledge = (self.t < self.unstick_until and blocked
-                     and z + stats["step_up"] < top <= z + 6.0
-                     and not self.world.solid_point(tx, ty, top + stats["height"] * 0.5))
-            boost = boost and ledge and energy >= reserve + stats["jet_drain"] * 0.3
-            jump = jump and self.t < self.unstick_until and blocked
-        else:
-            moving = math.hypot(*move) >= 0.3
-            urgent_zone = not me.get("in_zone", True) or self.zone_urgency() >= 0.9
-            urgent_hit = any(
-                (kind == "mortar" and eta <= 0.7
-                 and math.dist(point[:2], self.pos[:2]) <= self.cfg["weapons"]["mortar"]["splash_radius"] + 10)
-                or (kind == "gun" and 0 <= eta <= 0.2
-                    and abs((self.pos[0] - point[0]) * velocity[1]
-                            - (self.pos[1] - point[1]) * velocity[0])
-                    <= (stats["radius"] + 3.0) * max(1.0, math.hypot(*velocity[:2])))
-                for kind, point, velocity, eta in incoming
-            )
-            urgent = moving and (urgent_zone or urgent_hit or any(not lock.est for lock in locks))
-            cover_run = moving and sample.get("cover_run", False)
-            active = cover_run and energy >= 0.16 * cap + min_step
-            boost = active or (boost and urgent and energy >= 0.16 * cap + min_step)
-            if not boost and sample.get("danger") and moving and energy >= reserve + min_step:
-                boost = original[0]
-        if (boost, jump) != original or active:
-            sample.update(energy_change=(boost, jump) != original, energy_defense=active)
-            self.crossfire.sample = sample
-        return bool(boost), bool(jump)
 
     def phase(self) -> str:
         """Phase from mechs alive; the squad rarely loses members, so a closing zone also
@@ -795,7 +750,12 @@ class Agent:
                     if pk["kind"] in kinds0 or pk["kind"] not in pref0 or abs(pk["pos"][2] - z) > 3.5:
                         continue
                     dg = math.dist(pk["pos"][:2], (x, y))
-                    if dg < P["grab_r"] and (best_g is None or dg < best_g[0]):
+                    gr = P["grab_r"]
+                    if P["laser_far"] and pk["kind"] == "laser" and self.t < P["laser_far_t"]:
+                        gr = max(gr, P["laser_far_r"])
+                    if P["any_far"] and None in kinds0:
+                        gr = max(gr, P["any_far_r"])
+                    if dg < gr and (best_g is None or dg < best_g[0]):
                         best_g = (dg, (float(pk["pos"][0]), float(pk["pos"][1])))
                 if best_g is not None:
                     self.grab_pt = best_g[1]
@@ -1071,8 +1031,6 @@ class Agent:
         U[veto] = -1_000_000.0
 
         best = int(np.argmax(U))
-        if time.perf_counter() < self.deadline:
-            best = self.crossfire.select(self, obs, pts, U, veto, best, f_aoe)
         tx, ty = pts[best]
         self.dest = (tx, ty)
         if on_roof and best == 0:
@@ -1125,6 +1083,8 @@ class Agent:
                 return {"lightning" if other[0] == "laser" else "laser": 1.0}
         if self.P["swap_mortar"] and "mortar" in kinds:
             return {"lightning": 0.9, "laser": 0.9}
+        if self.P["laser_swap"] and "lightning" in kinds and "laser" not in kinds:
+            return {"laser": 1.0}
         return {}
 
     def loot_objects(self, obs: dict, kinds) -> List[Tuple[float, float, float]]:
@@ -1199,7 +1159,10 @@ class Agent:
             return {}
         if None in kinds:
             return {"take": best[1]}
-        slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
+        if self.P["laser_swap"] and "lightning" in kinds and "laser" in want:
+            slot = kinds.index("lightning")
+        else:
+            slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
         w = weapons[slot]
         if w.get("cooldown", 0) > 0.5:
             return {}
