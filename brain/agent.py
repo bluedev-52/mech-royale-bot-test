@@ -111,9 +111,12 @@ DEFAULTS = {
     "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
+    "laser_swap": 1,         # trade a carried lightning for a laser pickup
+    "any_far": 1,            # with an empty slot, grab any weapon pickup up to any_far_r m (whole match)
+    "any_far_r": 250.0,
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
-    "laser_far_r": 150.0,
-    "laser_far_t": 120.0,
+    "laser_far_r": 250.0,
+    "laser_far_t": 240.0,
     "w_grab": 40.0,          # utility of closing on the grab point
     "grab_safe": 0,          # only grab when no gunner is within 100 m
     "take_any": 1,           # take the weapon even with a shooter aiming at us
@@ -750,6 +753,8 @@ class Agent:
                     gr = P["grab_r"]
                     if P["laser_far"] and pk["kind"] == "laser" and self.t < P["laser_far_t"]:
                         gr = max(gr, P["laser_far_r"])
+                    if P["any_far"] and None in kinds0:
+                        gr = max(gr, P["any_far_r"])
                     if dg < gr and (best_g is None or dg < best_g[0]):
                         best_g = (dg, (float(pk["pos"][0]), float(pk["pos"][1])))
                 if best_g is not None:
@@ -1078,6 +1083,8 @@ class Agent:
                 return {"lightning" if other[0] == "laser" else "laser": 1.0}
         if self.P["swap_mortar"] and "mortar" in kinds:
             return {"lightning": 0.9, "laser": 0.9}
+        if self.P["laser_swap"] and "lightning" in kinds and "laser" not in kinds:
+            return {"laser": 1.0}
         return {}
 
     def loot_objects(self, obs: dict, kinds) -> List[Tuple[float, float, float]]:
@@ -1152,7 +1159,10 @@ class Agent:
             return {}
         if None in kinds:
             return {"take": best[1]}
-        slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
+        if self.P["laser_swap"] and "lightning" in kinds and "laser" in want:
+            slot = kinds.index("lightning")
+        else:
+            slot = kinds.index("mortar") if "mortar" in kinds else kinds.index("gun")
         w = weapons[slot]
         if w.get("cooldown", 0) > 0.5:
             return {}
