@@ -118,10 +118,10 @@ DEFAULTS = {
     "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
     "grab_mem": 0,           # keep heading for a wanted weapon pickup seen in the last 6 s when it drops out of view
     "grab_path": 0,          # walk a local nav field to a grab point the straight line cannot reach
-    "laser_swap": 0,         # trade a carried lightning for a laser pickup
+    "laser_swap": 1,         # trade a carried lightning for a laser pickup
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
-    "laser_far_r": 150.0,
-    "laser_far_t": 120.0,
+    "laser_far_r": 250.0,
+    "laser_far_t": 240.0,
     "w_grab": 40.0,          # utility of closing on the grab point
     "grab_safe": 0,          # only grab when no gunner is within 100 m
     "take_any": 1,           # take the weapon even with a shooter aiming at us
