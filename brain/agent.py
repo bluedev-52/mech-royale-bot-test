@@ -156,6 +156,14 @@ DEFAULTS = {
     "k5_mem": 20.0,
     "k5_look": 1,
     "k5_x": 0.0,             # with nothing heard or remembered: utility of open (far-seeing) cells, half of it toward the next zone centre            # aim at the peek goal instead of scanning
+    "k6e": 0,                # K6a: with a mech in sight, threat/duel/dodge boosts keep k6e_res energy for the escape boost
+    "k6e_res": 45.0,
+    "k6b": 0,                # K6b: retreat earlier (2+ hostile mechs in sight or a burst of k6b_dmg max HP in k6b_win s), no dueling while retreating
+    "k6b_win": 3.0,
+    "k6b_dmg": 0.15,
+    "k6b_cov": 2.0,
+    "k6c": 0,                # K6c: laser first: prefer laser pickups over lightning, grab them farther for the whole match
+    "k6c_r": 400.0,
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
     "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
@@ -269,6 +277,7 @@ class Agent:
         self.blobs: List[Tuple[float, float, float, str, float]] = []
         self.attackers: Dict[int, float] = {}
         self.last_hit_t = -1e9
+        self.dmg_log = []
         self.last_dmg_bearing: Optional[Tuple[float, float]] = None
         self.target_id: Optional[int] = None
         self.target_s = 0.0
@@ -459,6 +468,7 @@ class Agent:
         for e in obs.get("events", []):
             if e.get("type") == "damaged" and e.get("weapon") != "zone":
                 self.last_hit_t = t
+                self.dmg_log.append((t, float(e.get("amount") or 0.0)))
                 if e.get("bearing") is not None:
                     self.last_dmg_bearing = (e["bearing"], t)
                     if e.get("rear"):
@@ -824,8 +834,14 @@ class Agent:
             and self.zone_urgency() < P["amb_urg"] and not any(
             th.id < 100 and not th.est and self.t - th.seen < 0.5 and dmeE[th.id] < P["amb_r"] for th in enemies)
         fresh = [th for th in enemies if th.id < 100 and not th.est and self.t - th.seen < 5.0]
+        swarm = bool(P["retreat"]) and sum(
+            1 for a, ta in self.attackers.items() if a < 100 and self.t - ta < P["ret_win"]) >= P["ret_n"]
+        if P["k6b"] and not swarm:
+            self.dmg_log = [d for d in self.dmg_log if self.t - d[0] < P["k6b_win"]]
+            burst = sum(d[1] for d in self.dmg_log) >= P["k6b_dmg"] * me["max_hp"]
+            swarm = burst or sum(1 for th in fresh if self.t - th.seen < 1.0 and self.hostile(th)) >= 2
         self.dueling = bool(P["duel"]) and 0 < len(fresh) <= P["duel_n"] and hp > P["duel_hp"] \
-            and me.get("in_zone", True) and self.zone_urgency() < 0.5
+            and me.get("in_zone", True) and self.zone_urgency() < 0.5 and not (P["k6b"] and swarm)
         duel_th = min(fresh, key=lambda th: dmeE[th.id]) if self.dueling else None
         if self.dueling:
             W["dist"] *= P["duel_w"]
@@ -833,10 +849,8 @@ class Agent:
             W["cross"] *= P["duel_cov"]
         if P["surv"]:
             W["dist"] *= P["surv_dist"]
-        swarm = bool(P["retreat"]) and sum(
-            1 for a, ta in self.attackers.items() if a < 100 and self.t - ta < P["ret_win"]) >= P["ret_n"]
         if swarm:
-            W["cover"] *= P["ret_cov"]
+            W["cover"] *= P["ret_cov"] * (P["k6b_cov"] if P["k6b"] else 1.0)
             W["dist"] *= P["ret_dist"]
         if self.hiding:
             W["cover"] *= P["amb_cov"]
@@ -859,6 +873,8 @@ class Agent:
                     gr = P["grab_r"]
                     if P["laser_far"] and pk["kind"] == "laser" and self.t < P["laser_far_t"]:
                         gr = max(gr, P["laser_far_r"])
+                    if P["k6c"] and pk["kind"] == "laser":
+                        gr = max(gr, P["k6c_r"])
                     if P["any_far"] and None in kinds0:
                         gr = max(gr, P["any_far_r"])
                     if dg < gr and (best_g is None or dg < best_g[0]):
@@ -1197,14 +1213,16 @@ class Agent:
         self.heading = h
         mag = 1.0 if L >= 3.0 else max(0.3, L / 3.0)
         threatened = bool(locks or incoming or shooter_near)
-        boost = me["energy"] > P["energy_reserve"] and (
+        res = P["k6e_res"] if P["k6e"] and any(
+            th.id < 100 and not th.est and self.t - th.seen < 3.0 for th in enemies) else P["energy_reserve"]
+        boost = me["energy"] > res and (
             threatened or urg >= 1.0 or not me.get("in_zone", True))
         if duel_th is not None and P["duel_boost"] and dmeE[duel_th.id] > P["duel_r"] + 15 \
-                and me["energy"] > 20 and h[0] * (duel_th.pos[0] - x) + h[1] * (duel_th.pos[1] - y) > 0:
+                and me["energy"] > max(20, res) and h[0] * (duel_th.pos[0] - x) + h[1] * (duel_th.pos[1] - y) > 0:
             boost, mag = True, 1.0
         if swarm and me["energy"] > 15:
             boost, mag = True, 1.0
-        if gunners and min(dmeE[th.id] for th in gunners) < P["dodge_boost_r"] and me["energy"] > 15:
+        if gunners and min(dmeE[th.id] for th in gunners) < P["dodge_boost_r"] and me["energy"] > max(15, res):
             boost, mag = True, 1.0
         # acoustic stealth: no combat in sight and no zone pressure -> walk at <= 5 m/s, no boost
         recent = any(not th.est and self.t - th.seen < 3.0 for th in enemies if th.id < 100)
@@ -1254,7 +1272,7 @@ class Agent:
     def weapon_pref(self, kinds) -> Dict[str, float]:
         """Wanted pickups: any weapon for an empty slot; with swap_mortar a carried mortar
         (laser cook-off bait, slow shells) is traded for a laser or lightning."""
-        pref = {"lightning": 1.0, "laser": 0.95}
+        pref = {"lightning": 0.7, "laser": 1.0} if self.P["k6c"] else {"lightning": 1.0, "laser": 0.95}
         if self.P["mortar_ok"]:
             pref["mortar"] = 0.6
         if None in kinds:
@@ -1263,6 +1281,8 @@ class Agent:
             other = [k for k in kinds if k in ("laser", "lightning")]
             if other:
                 return {"lightning" if other[0] == "laser" else "laser": 1.0}
+        if self.P["k6c"] and "mortar" in kinds and "laser" not in kinds:
+            return {"laser": 1.0}
         if self.P["swap_mortar"] and "mortar" in kinds:
             return {"lightning": 0.9, "laser": 0.9}
         if self.P["laser_swap"] and "lightning" in kinds and "laser" not in kinds:
