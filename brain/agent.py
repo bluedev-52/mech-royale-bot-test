@@ -115,6 +115,7 @@ DEFAULTS = {
     "crowd_n": 3,
     "crowd_r": 90.0,
     "w_crowd": 15.0,
+    "laser_min_d": 0.0,      # >0: below this range, with a clear gun shot and no charge started, use the gun
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
     "laser_far_r": 150.0,
     "laser_far_t": 120.0,
@@ -1297,7 +1298,10 @@ class Agent:
             return aim, fire
         if short:
             return aim, fire
-        if "laser" in kinds and d <= 280 and clear:
+        close_gun = (self.P["laser_min_d"] > 0 and d < self.P["laser_min_d"] and "gun" in kinds
+                     and "laser" in kinds and float(weapons[kinds.index("laser")].get("charge", 0)) <= 0
+                     and weapons[kinds.index("gun")].get("ammo", 1) > 0)
+        if "laser" in kinds and d <= 280 and clear and not close_gun:
             s = kinds.index("laser")
             w = weapons[s]
             err = abs(wrap(aim[0] - me["aim"][0])) + abs(aim[1] - me["aim"][1])
