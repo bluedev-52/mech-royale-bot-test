@@ -104,7 +104,7 @@ DEFAULTS = {
     "no_gun": 0,             # with a laser or lightning, trade the gun for the other one
     "upg_weapon": 0,         # take laser/lightning upgrades before survival ones
     "dual": 0,               # fire the gun alongside a charging laser or the lightning
-    "laser_hold": 0.75,      # laser charge (s) to release at on an exposed target
+    "laser_hold": 0.6,       # laser charge (s) to release at on an exposed target
     "cube_grab": 1,          # walk straight onto visible cubes within cube_grab_r (3.5 m pickup radius)
     "cube_grab_r": 40.0,
     "drop_grab": 0,          # walk onto a landed, unheld supply drop (3 cubes + full HP) within drop_grab_r
@@ -123,7 +123,7 @@ DEFAULTS = {
     "amb_urg": 0.4,
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
-    "seek": 0,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
+    "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
     "seek_t": 200.0,         # seek only before this match time
     "seek_mem": 8.0,         # follow sounds heard this recently
     "w_seek": 30.0,          # utility of closing on the seek goal
