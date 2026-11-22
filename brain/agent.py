@@ -148,6 +148,13 @@ DEFAULTS = {
     "k4_app": 1,             # wider short approach toward free targets; only hostile mechs block it
     "k4_app_r": (60.0, 230.0),
     "k4_app_hp": 0.4,
+    "k5": 0,                 # K5: peek. With no mech in sight, move to points with line of sight to the latest heard/remembered mech
+    "w_peek": 40.0,
+    "k5_r": (40.0, 190.0),   # peek distance band to the goal
+    "k5_hp": 0.4,
+    "k5_quiet": 3.0,         # only when nothing hit us for this long
+    "k5_mem": 20.0,
+    "k5_look": 1,            # aim at the peek goal instead of scanning
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
     "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
@@ -635,6 +642,28 @@ class Agent:
             return False
         return self.t - self.aimed.get(th.id, -1e9) >= m
 
+    def peek_goal(self, me: dict):
+        P = self.P
+        if not P["k5"] or not me.get("in_zone", True) or self.zone_urgency() >= 0.5:
+            return None
+        if me["hp"] / max(1.0, me["max_hp"]) <= P["k5_hp"] or self.t - self.last_hit_t < P["k5_quiet"]:
+            return None
+        if any(0 <= th.id < 100 and not th.est and self.t - th.seen < 2.0 for th in self.threats.values()):
+            return None
+        best = None
+        for bx, by, bt, k, w in self.blobs:
+            if k in ("step", "boost", "jet", "reload") or self.t - bt > P["seek_mem"]:
+                continue
+            if best is None or bt > best[2]:
+                best = (bx, by, bt)
+        if best is not None:
+            return (best[0], best[1])
+        mem = [th for th in self.threats.values() if 0 <= th.id < 100 and self.t - th.seen < P["k5_mem"]]
+        if mem:
+            th = min(mem, key=lambda o: (self.t - self.attackers.get(o.id, -1e9) < 8.0, math.dist(o.pos[:2], self.pos[:2])))
+            return (float(th.pos[0]), float(th.pos[1]))
+        return None
+
     def k1_active(self) -> bool:
         return bool(self.P["k1"]) and (self.t < self.P["k1_t"] or self.k4_on("k4_all"))
 
@@ -1094,6 +1123,20 @@ class Agent:
             if goal is not None:
                 dgs = np.hypot(X - goal[0], Y - goal[1])
                 U = U + P["w_seek"] * np.clip(1.0 - dgs / max(math.dist(goal, (x, y)), 1.0), 0.0, 1.0)
+        pg = self.peek_goal(me)
+        self.k5_goal = pg
+        if pg is not None and time.perf_counter() < self.deadline:
+            dpg = np.hypot(X - pg[0], Y - pg[1])
+            gz5 = np.full(n, z) if on_roof else np.array([self.world.ground_at(px, py) for px, py in pts])
+            eh = self.mech.get("eye_height", 8.0)
+            A = np.stack([X, Y, gz5 + eh], axis=1)
+            B = np.repeat([[pg[0], pg[1], self.world.ground_at(pg[0], pg[1]) + 5.0]], n, axis=0)
+            vis5 = self.world.los_batch(A, B, vision=True, step=2.0)
+            lo, hi = P["k5_r"]
+            band = (dpg > lo) & (dpg < hi)
+            U = U + P["w_peek"] * (vis5 & band)
+            if not (vis5 & band).any() and not seeking:
+                U = U + P["w_seek"] * np.clip(1.0 - dpg / max(math.dist(pg, (x, y)), 1.0), 0.0, 1.0)
         k4a = self.k4_on("k4_app") and target is not None and target[0].id < 100 and self.free_mech(target[0])
         if P["k1"] and P["k1_app"] and self.k1_active() and target is not None and target[0].id < 100 \
                 and me.get("in_zone", True) and hp > (P["k4_app_hp"] if k4a else 0.5):
@@ -1347,6 +1390,9 @@ class Agent:
                 return list(yaw_pitch(eye, (th.pos[0], th.pos[1], th.pos[2] + 4.5))), [False, False]
         if self.last_dmg_bearing and t - self.last_dmg_bearing[1] < 3.0:
             return [self.last_dmg_bearing[0], 0.0], [False, False]
+        pg = getattr(self, "k5_goal", None)
+        if pg is not None and self.P["k5_look"]:
+            return [math.atan2(pg[1] - y, pg[0] - x), 0.0], [False, False]
         if self.blobs:
             b = max(self.blobs, key=lambda b: b[4] / (1.0 + t - b[2]))
             if t - b[2] < 4.0:
