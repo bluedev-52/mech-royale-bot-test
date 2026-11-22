@@ -156,7 +156,7 @@ DEFAULTS = {
     "k5_mem": 20.0,
     "k5_look": 1,
     "k5_x": 0.0,             # with nothing heard or remembered: utility of open (far-seeing) cells, half of it toward the next zone centre            # aim at the peek goal instead of scanning
-    "k6e": 0,                # K6a: with a mech in sight, threat/duel/dodge boosts keep k6e_res energy for the escape boost
+    "k6e": 1,                # K6a: with a mech in sight, threat/duel/dodge boosts keep k6e_res energy for the escape boost
     "k6e_res": 45.0,
     "k6b": 0,                # K6b: retreat earlier (2+ hostile mechs in sight or a burst of k6b_dmg max HP in k6b_win s), no dueling while retreating
     "k6b_win": 3.0,
