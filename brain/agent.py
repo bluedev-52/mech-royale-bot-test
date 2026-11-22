@@ -116,6 +116,8 @@ DEFAULTS = {
     "crowd_r": 90.0,
     "w_crowd": 15.0,
     "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
+    "grab_mem": 0,           # keep heading for a wanted weapon pickup seen in the last 6 s when it drops out of view
+    "grab_path": 0,          # walk a local nav field to a grab point the straight line cannot reach
     "laser_swap": 0,         # trade a carried lightning for a laser pickup
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
     "laser_far_r": 150.0,
@@ -537,6 +539,24 @@ class Agent:
                     out.append((p.get("kind", "gun"), pos, vel, along / sp))
         return out
 
+    def _grab_steer(self, x: float, y: float):
+        nav = self.nav
+        key = (round(self.grab_pt[0], 1), round(self.grab_pt[1], 1))
+        if getattr(self, "_gf_key", None) != key:
+            gc = nav.nearest_walk(*self.grab_pt)
+            if gc is None:
+                return None
+            J, I = nav.cell(x, y)
+            m = 12
+            win = (max(0, min(J, gc[0]) - m), min(nav.NY, max(J, gc[0]) + m + 1),
+                   max(0, min(I, gc[1]) - m), min(nav.NX, max(I, gc[1]) + m + 1))
+            goal = np.zeros_like(nav.walk)
+            goal[gc[0], gc[1]] = True
+            f = NavField(nav, goal, window=win)
+            f.run(max_iters=80)
+            self._gf_key, self._gf = key, f
+        return self._gf.steer(x, y)
+
     def update_cover(self, srcs: List[Threat]) -> None:
         """Tactical anchor: local field (~70 m) of walking distance to cells shielded from srcs."""
         if not srcs:
@@ -749,7 +769,12 @@ class Agent:
                                           and dmeE[th.id] < 100.0 for th in enemies)
             if pref0 and not busy:
                 best_g = None
-                for pk in obs.get("pickups", []):
+                cand_pk = list(obs.get("pickups", []))
+                if P["grab_mem"]:
+                    vis = {pk["id"] for pk in cand_pk}
+                    cand_pk += [{"id": k, "kind": v[0], "pos": v[1]} for k, v in self.loot_mem.items()
+                                if k not in vis and self.t - v[2] < 6.0]
+                for pk in cand_pk:
                     if pk["kind"] in kinds0 or pk["kind"] not in pref0 or abs(pk["pos"][2] - z) > 3.5:
                         continue
                     dg = math.dist(pk["pos"][:2], (x, y))
@@ -791,6 +816,12 @@ class Agent:
                 pts.append((x + (gx - x) / dg0 * 16.0, y + (gy - y) / dg0 * 16.0))
             else:
                 pts.append(self.grab_pt)
+        self._gp_idx = None
+        if self.grab_pt is not None and P["grab_path"] and not self.nav.clear_line(x, y, *self.grab_pt):
+            d = self._grab_steer(x, y)
+            if d is not None:
+                self._gp_idx = len(pts)
+                pts.append((x + d[0] * 12.0, y + d[1] * 12.0))
         n = len(pts)
         C = np.array(pts)
         X, Y = C[:, 0], C[:, 1]
@@ -1031,6 +1062,8 @@ class Agent:
         if self.grab_pt is not None:
             dgc = np.hypot(X - self.grab_pt[0], Y - self.grab_pt[1])
             U = U + P["w_grab"] * np.clip(1.0 - dgc / max(math.dist(self.grab_pt, (x, y)), 1.0), 0.0, 1.0)
+        if self._gp_idx is not None:
+            U[self._gp_idx] += P["w_grab"]
         if P["surv"]:
             U = U + P["w_center"] * np.clip(1.0 - dn / max(nr, 1.0), 0.0, 1.0)
         if self.hiding and P["w_hold"] > 0:
