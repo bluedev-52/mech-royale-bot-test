@@ -126,6 +126,17 @@ DEFAULTS = {
     "ret_n": 2,
     "ret_cov": 3.0,
     "ret_dist": 0.3,
+    "k1": 0,                 # K1: before k1_t s rank targets by kill speed vs exposure, commit to finishes
+    "k1_t": 120.0,
+    "k1_dps": 60.0,          # own DPS at full hit utility, for time-to-kill
+    "k1_ttk0": 8.0,          # kill value = 1 / (1 + ttk / k1_ttk0)
+    "k1_w": 1.5,
+    "k1_risk": 0.35,         # penalty per other fresh mech within k1_risk_r of us
+    "k1_risk_r": 150.0,
+    "k1_fin": 0.35,          # keep a clear target below this HP fraction
+    "k1_app": 1,             # short approach toward a favourable target
+    "k1_app_r": (110.0, 170.0),
+    "w_k1app": 25.0,
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
     "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
@@ -609,6 +620,8 @@ class Agent:
         muzzle = self.pos + np.array([0.0, 0.0, mh])
         scored: Dict[int, Tuple[float, Threat, bool]] = {}
         any_mech = any(0 <= th.id < 100 and not th.est and self.t - th.seen < 0.3 for th in self.threats.values())
+        k1 = bool(P["k1"]) and self.t < P["k1_t"]
+        fresh = [o for o in self.threats.values() if 0 <= o.id < 100 and not o.est and self.t - o.seen < 1.0] if k1 else []
         for th in self.prey():
             if th.est or self.t - th.seen > 0.3:
                 continue
@@ -631,6 +644,10 @@ class Agent:
                 - P["u_obst"] * obst
             if th.id >= 100 and any_mech:
                 s -= 0.4  # a squad mech in sight outranks a drone
+            if k1:
+                ttk = th.hp / max(1.0, P["k1_dps"] * hit * (1.0 if clear else 0.3))
+                others = sum(1 for o in fresh if o.id != th.id and math.dist(o.pos[:2], self.pos[:2]) < P["k1_risk_r"])
+                s += P["k1_w"] / (1.0 + ttk / P["k1_ttk0"]) - P["k1_risk"] * others
             scored[th.id] = (s, th, clear)
         if not scored:
             self.target_id = None
@@ -639,6 +656,10 @@ class Agent:
         cur = scored.get(self.target_id) if self.target_id is not None else None
         if cur is not None and scored[best_id][0] <= P["hysteresis"] * cur[0]:
             best_id = self.target_id
+        if k1 and cur is not None and cur[2] and cur[1].hp / max(1.0, cur[1].max_hp) < P["k1_fin"]:
+            best_id = self.target_id
+        if best_id != self.target_id and self.target_id is not None:
+            self.k1_sw = getattr(self, "k1_sw", 0) + 1
         self.target_id = best_id
         s, th, clear = scored[best_id]
         self.target_s = s
@@ -1042,6 +1063,17 @@ class Agent:
             if goal is not None:
                 dgs = np.hypot(X - goal[0], Y - goal[1])
                 U = U + P["w_seek"] * np.clip(1.0 - dgs / max(math.dist(goal, (x, y)), 1.0), 0.0, 1.0)
+        if P["k1"] and P["k1_app"] and self.t < P["k1_t"] and target is not None and target[0].id < 100 \
+                and me.get("in_zone", True) and hp > 0.5:
+            tp = target[0].pos
+            dtg = math.dist(tp[:2], (x, y))
+            lo, hi = P["k1_app_r"]
+            near_others = sum(1 for th in enemies if th.id < 100 and th.id != target[0].id and not th.est
+                              and self.t - th.seen < 1.0 and dmeE[th.id] < P["k1_risk_r"])
+            if lo < dtg < hi and near_others == 0:
+                dgt = np.hypot(X - tp[0], Y - tp[1])
+                U = U + P["w_k1app"] * np.clip((dtg - dgt) / max(dtg - lo, 1.0), 0.0, 1.0)
+                self.k1_app_t = getattr(self, "k1_app_t", 0.0) + 0.1
         if self.grab_pt is not None:
             dgc = np.hypot(X - self.grab_pt[0], Y - self.grab_pt[1])
             U = U + P["w_grab"] * np.clip(1.0 - dgc / max(math.dist(self.grab_pt, (x, y)), 1.0), 0.0, 1.0)
