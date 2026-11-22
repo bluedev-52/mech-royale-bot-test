@@ -126,7 +126,7 @@ DEFAULTS = {
     "ret_n": 2,
     "ret_cov": 3.0,
     "ret_dist": 0.3,
-    "k1": 0,                 # K1: before k1_t s rank targets by kill speed vs exposure, commit to finishes
+    "k1": 1,                 # K1: before k1_t s rank targets by kill speed vs exposure, commit to finishes
     "k1_t": 120.0,
     "k1_dps": 60.0,          # own DPS at full hit utility, for time-to-kill
     "k1_ttk0": 8.0,          # kill value = 1 / (1 + ttk / k1_ttk0)
