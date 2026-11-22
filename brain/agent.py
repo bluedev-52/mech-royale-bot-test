@@ -124,7 +124,7 @@ DEFAULTS = {
     "keep_hostile": 0,       # w_keep spacing only from mechs that hit us or aimed at us recently
     "keep_mem": 30.0,
     "seek": 1,               # early hunt: with no mech in sight, walk toward the latest heard mech/combat sound
-    "seek_t": 200.0,         # seek only before this match time
+    "seek_t": 300.0,         # seek only before this match time
     "seek_mem": 8.0,         # follow sounds heard this recently
     "w_seek": 30.0,          # utility of closing on the seek goal
     "seek_hp": 0.5,          # seek only above this HP fraction
