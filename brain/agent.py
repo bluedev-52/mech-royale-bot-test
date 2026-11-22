@@ -118,6 +118,10 @@ DEFAULTS = {
     "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
     "grab_mem": 0,           # keep heading for a wanted weapon pickup seen in the last 6 s when it drops out of view
     "grab_path": 0,          # walk a local nav field to a grab point the straight line cannot reach
+    "rear_sector": 0,        # torso guard: turn to the 45-deg sector with the most incoming damage (held guard_hold s)
+    "guard_dmg": 90.0,       # incoming damage in the last guard_win s that triggers a turn to a sector off the front arc
+    "guard_win": 1.5,
+    "guard_hold": 0.8,
     "any_far": 1,            # with an empty slot, grab any weapon pickup up to any_far_r m (whole match)
     "any_far_r": 250.0,
     "laser_swap": 1,         # trade a carried lightning for a laser pickup
@@ -251,6 +255,8 @@ class Agent:
         self.offense = self.P.get("style") == "offense"
         self.crates: List[dict] = []
         self.rear_hits: List[Tuple[float, float, Optional[int]]] = []
+        self.dmg_log: List[Tuple[float, float, float, Optional[int]]] = []
+        self.guard: Optional[Tuple[float, float, Optional[int]]] = None
         self.flip = 1.0
         self.flip_t = 0.0
         self.loot_mem: Dict[int, Tuple[str, Tuple[float, float, float], float]] = {}
@@ -422,6 +428,8 @@ class Agent:
                 self.last_hit_t = t
                 if e.get("bearing") is not None:
                     self.last_dmg_bearing = (e["bearing"], t)
+                    self.dmg_log = [r for r in self.dmg_log if t - r[1] < 4.0]
+                    self.dmg_log.append((e["bearing"], t, float(e.get("amount", 0)), e.get("by")))
                     if e.get("rear"):
                         self.rear_hits = [r for r in self.rear_hits if t - r[1] < 2.0]
                         self.rear_hits.append((e["bearing"], t, e.get("by")))
@@ -1217,6 +1225,60 @@ class Agent:
             return {}
         return {"take": best[1], "drop": slot}
 
+    def dmg_sectors(self, win: float):
+        """Incoming damage of the last win s binned in 8 sectors of 45 deg (each hit also counts half
+        in the two neighbours, bearing noise is ~7 deg); returns (yaw, damage, attacker) of the top sector."""
+        t = self.t
+        acc = np.zeros(8)
+        who: Dict[int, Dict] = {}
+        for b, tt, a, by in self.dmg_log:
+            if t - tt > win:
+                continue
+            k = int(round(b / (math.pi / 4))) % 8
+            for dk, wgt in ((0, 1.0), (-1, 0.5), (1, 0.5)):
+                acc[(k + dk) % 8] += a * wgt
+            who.setdefault(k, {})
+            if by is not None:
+                who[k][by] = who[k].get(by, 0.0) + a
+        if acc.max() <= 0:
+            return None
+        k = int(acc.argmax())
+        bs = [b for b, tt, a, by in self.dmg_log if t - tt <= win and min((int(round(b / (math.pi / 4))) - k) % 8,
+                                                                         (k - int(round(b / (math.pi / 4)))) % 8) <= 1]
+        yaw = math.atan2(sum(math.sin(b) for b in bs), sum(math.cos(b) for b in bs)) if bs else k * math.pi / 4
+        att = {}
+        for dk in (-1, 0, 1):
+            for by, a in who.get((k + dk) % 8, {}).items():
+                att[by] = att.get(by, 0.0) + a
+        return yaw, float(acc[k]), (max(att, key=att.get) if att else None)
+
+    def guard_sector(self, target):
+        """Hold the front arc on the sector hurting us most when it lies off the arc and outweighs the
+        damage coming from the firing target; keep that guard guard_hold s to avoid flicking."""
+        t = self.t
+        P = self.P
+        if self.guard is not None and t < self.guard[1]:
+            return self.guard[0], self.guard[2]
+        self.guard = None
+        sec = self.dmg_sectors(P["guard_win"])
+        if sec is None or sec[1] < P["guard_dmg"]:
+            return None
+        yaw_s, dmg, by = sec
+        yaw = float(self.me["aim"][0])
+        if abs(wrap(yaw_s - yaw)) < math.pi / 2:
+            return None
+        if target is not None:
+            th = target[0]
+            if by == th.id:
+                return None
+            tb = math.atan2(th.pos[1] - self.pos[1], th.pos[0] - self.pos[0])
+            from_t = sum(a for b, tt, a, b2 in self.dmg_log
+                         if t - tt <= P["guard_win"] and abs(wrap(b - tb)) < math.pi / 4)
+            if dmg < 1.5 * from_t or th.hp / max(1.0, th.max_hp) <= 0.3:
+                return None
+        self.guard = (yaw_s, t + P["guard_hold"], by)
+        return yaw_s, by
+
     # ================================================================== aim / fire
     def plan_aim_fire(self, locks, target):
         me = self.me
@@ -1225,8 +1287,17 @@ class Agent:
         eye = (x, y, z + me["stats"].get("muzzle_height", self.mech.get("muzzle_height", 7.0)))
         weapons = me["weapons"]
         kinds = [w["kind"] if w else None for w in weapons]
+        if self.P["rear_sector"]:
+            g = self.guard_sector(target)
+            if g is not None:
+                yaw_g, by = g
+                src = self.threats.get(by) if by is not None else None
+                if src is not None and t - src.seen < 5.0 and not src.est:
+                    return self.weapon_choice(src, weapons, kinds, eye, math.dist(src.pos[:2], (x, y)), False,
+                                              self._shot_clear(np.array(eye), src))
+                return [yaw_g, 0.0], [False, False]
         rear = [r for r in self.rear_hits if t - r[1] < 1.2]
-        if len(rear) >= 2 and (target is None or (rear[-1][2] != target[0].id
+        if not self.P["rear_sector"] and len(rear) >= 2 and (target is None or (rear[-1][2] != target[0].id
                                                   and target[0].hp / max(1.0, target[0].max_hp) > 0.3)):
             # taking x1.5 hits from behind: turn the front arc to that attacker and shoot back
             src = self.threats.get(rear[-1][2]) if rear[-1][2] is not None else None
@@ -1265,6 +1336,10 @@ class Agent:
                      * math.exp(-(t - th.seen) / self.P["decay_s"]))
             if t - th.seen < 4.0:
                 return list(yaw_pitch(eye, (th.pos[0], th.pos[1], th.pos[2] + 4.5))), [False, False]
+        if self.P["rear_sector"] and self.dmg_log:
+            sec = self.dmg_sectors(4.0)
+            if sec is not None:
+                return [sec[0], 0.0], [False, False]
         if self.last_dmg_bearing and t - self.last_dmg_bearing[1] < 3.0:
             return [self.last_dmg_bearing[0], 0.0], [False, False]
         if self.blobs:
