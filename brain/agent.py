@@ -111,11 +111,11 @@ DEFAULTS = {
     "drop_grab_r": 250.0,
     "grab": 1,               # walk straight onto a wanted weapon pickup (rings never land within 4 m)
     "grab_r": 80.0,          # grab pickups this close
-    "crowd": 0,              # steer away from spots with crowd_n+ fresh rivals within crowd_r m (zone veto still applies)
+    "crowd": 1,              # steer away from spots with crowd_n+ fresh rivals within crowd_r m (zone veto still applies)
     "crowd_n": 3,
     "crowd_r": 90.0,
     "w_crowd": 15.0,
-    "laser_min_d": 0.0,      # >0: below this range, with a clear gun shot and no charge started, use the gun
+    "laser_min_d": 90.0,     # >0: below this range, with a clear gun shot and no charge started, use the gun
     "laser_far": 1,          # before laser_far_t s, grab a laser pickup up to laser_far_r m
     "laser_far_r": 150.0,
     "laser_far_t": 120.0,
